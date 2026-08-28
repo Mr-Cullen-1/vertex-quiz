@@ -13,6 +13,8 @@ import { getEnv } from "@/lib/env";
  * so RLS has nothing to key ownership off for them. Use
  * `createAdminClient()` from `./admin` there instead.
  */
+export type SupabaseServerClient = Awaited<ReturnType<typeof createClient>>;
+
 export async function createClient() {
   const env = getEnv();
   const cookieStore = await cookies();

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/server";
 import { assertNoError } from "@/lib/supabase/assert-no-error";
 import { DeleteQuizButton } from "./_components/delete-quiz-button";
+import { PdfGenerationPanel } from "./_components/pdf-generation-panel";
 
 type QuizDetail = {
   id: string;
@@ -19,6 +20,7 @@ type QuizDetail = {
   duration_minutes: number | null;
   ends_at: string | null;
   created_at: string;
+  source_pdf_path: string | null;
 };
 
 const STATUS_LABEL: Record<QuizDetail["status"], string> = {
@@ -60,7 +62,7 @@ export default async function QuizDetailPage(
   const { data: quiz, error } = await supabase
     .from("quizzes")
     .select(
-      "id, title, description, status, multiple_choice_count, true_false_count, total_questions, duration_minutes, ends_at, created_at"
+      "id, title, description, status, multiple_choice_count, true_false_count, total_questions, duration_minutes, ends_at, created_at, source_pdf_path"
     )
     .eq("id", id)
     .maybeSingle()
@@ -76,6 +78,13 @@ export default async function QuizDetailPage(
   }
 
   const isDraft = quiz.status === "draft";
+
+  const { count: questionCount, error: questionCountError } = await supabase
+    .from("questions")
+    .select("*", { count: "exact", head: true })
+    .eq("quiz_id", quiz.id);
+
+  assertNoError(questionCountError, "Failed to load question count");
 
   return (
     <div className="flex flex-col gap-6">
@@ -154,9 +163,19 @@ export default async function QuizDetailPage(
       </div>
 
       {isDraft ? (
+        <PdfGenerationPanel
+          quizId={quiz.id}
+          multipleChoiceCount={quiz.multiple_choice_count}
+          trueFalseCount={quiz.true_false_count}
+          hasSourcePdf={Boolean(quiz.source_pdf_path)}
+          existingQuestionCount={questionCount ?? 0}
+        />
+      ) : null}
+
+      {isDraft ? (
         <p className="text-sm text-muted-foreground">
-          This quiz is a draft — questions, AI extraction, and publishing
-          arrive in later phases.
+          Publishing arrives in a later phase — for now this quiz stays a
+          draft you can keep editing.
         </p>
       ) : null}
     </div>

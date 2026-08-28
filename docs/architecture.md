@@ -16,7 +16,7 @@ different front-ends sharing one backend:
                     │   lib/supabase (server client) │──▶ Supabase Postgres (RLS)
                     │            │                  │      + Supabase Auth
                     │            ▼                  │      + Supabase Storage (PDFs)
-                    │   lib/ai (Gemini service)      │──▶ Google Gemini API
+                    │   lib/gemini (Gemini service)  │──▶ Google Gemini API
                     │                              │
   Student ── code ──▶  (student) route group        │
   browser           │  Server Components + Actions  │
@@ -89,15 +89,17 @@ in the proxy alone cannot expose teacher data.
 ## Quiz lifecycle
 
 ```
-draft ──(Phase 3, this)──> draft with question structure
+draft (metadata only, Phase 3)
+  │  upload PDF → Gemini extraction → validate → save (Phase 4, this)
+  ▼
+draft with generated questions
   │
-  ├─(Phase 4)─> Gemini extraction fills in questions (still draft)
   ├─(Phase 5)─> teacher reviews/edits questions        (still draft)
   └─(Phase 6)─> teacher publishes ──────────────────> published ──> closed
 ```
 
-Phase 3 only implements the leftmost box: a teacher creates a `quizzes` row
-with a title, optional description, a fixed `multiple_choice_count` /
+Phase 3 implements quiz metadata: a teacher creates a `quizzes` row with a
+title, optional description, a fixed `multiple_choice_count` /
 `true_false_count` (and therefore `total_questions`), an optional
 `duration_minutes`, and an optional `ends_at` deadline. The row is always
 created with `status = 'draft'` — there is no code path that sets any other
@@ -118,10 +120,83 @@ re-check status/existence themselves so a rejected write surfaces a
 specific message ("Quiz not found." / "Only draft quizzes can be edited.")
 instead of a generic Postgres error.
 
-Nothing about *questions* exists yet — `questions`/`answers` rows aren't
-created until Phase 4 (Gemini) or Phase 5 (manual add). The `/quizzes/[id]`
-detail page shows the question *structure* the teacher chose (counts), not
-actual question content.
+Phase 4 fills in `questions`/`answers`: the teacher uploads a PDF, it's
+stored privately, sent to Gemini, and the validated result is saved as one
+atomic batch (see "PDF upload and AI question generation" below). The
+`/quizzes/[id]` detail page still doesn't show individual question
+content — the question *editor* (reading/editing each question and answer)
+is explicitly Phase 5 scope. Right now the detail page only shows: the
+requested structure (counts), whether a PDF is uploaded, and — once
+generation succeeds — a count summary ("10 questions generated") with the
+option to clear them and regenerate.
+
+## PDF upload and AI question generation
+
+```
+Teacher uploads PDF (src/lib/quizzes/generate-actions.ts: uploadQuizPdf)
+  → validated (type/size/magic bytes, src/lib/quizzes/pdf.ts)
+  → stored in Supabase Storage, bucket "quiz-pdfs", path {teacher_id}/{quiz_id}.pdf
+  → quizzes.source_pdf_path updated
+
+Teacher clicks "Generate" (generateQuestions)
+  → refuses if the quiz already has questions ("clear before regenerating")
+  → PDF downloaded back from Storage via the authenticated client
+  → sent to Gemini (gemini-flash-latest, @google/genai) as inline base64
+    data + a structured prompt (src/lib/gemini/prompt.ts) requesting
+    exactly the quiz's requested MC/TF counts
+  → response parsed as JSON, shape-checked with Zod
+    (src/lib/gemini/schema.ts), then checked against the actual business
+    rules (src/lib/gemini/validate.ts): exact total/MC/TF counts, exact
+    answer counts and correct-answer counts per type, non-empty text, no
+    duplicate MC options, the True/False answers are literally "True" and
+    "False"
+  → any validation failure rejects the whole batch — nothing partial is
+    ever written, and the specific mismatch is shown to the teacher
+  → valid batch inserted via the create_quiz_questions Postgres function
+    (one transaction for every question + its answers; Phase 1's deferred
+    validate_question_answers_trigger is a second, DB-level backstop
+    behind the same invariant)
+```
+
+**Storage security.** The `quiz-pdfs` bucket is private
+(`public = false`, `allowed_mime_types = ['application/pdf']`,
+`file_size_limit = 8 MB`) — there is no public/signed URL anywhere in this
+flow. RLS policies on `storage.objects` restrict each `authenticated`
+teacher to paths under their own `auth.uid()` folder, mirroring the
+`is_quiz_owner()` pattern used for `quizzes`/`questions`/`answers`. Upload
+and download both go through the same RLS-scoped server client used
+everywhere else (`src/lib/supabase/server.ts`) — never the service-role
+client, since this is a normal teacher operation with a real owner to
+scope RLS against. Verified directly (not just by code review): a second
+teacher's session gets `Object not found` downloading or listing another
+teacher's PDF path, the same "indistinguishable from nonexistent" pattern
+RLS already gives every other table.
+
+**Gemini never gets more trust than any other untrusted input.** The
+model's raw output is parsed and Zod-checked for *shape* only;
+`validate.ts` is the actual authority on correctness, and its acceptance
+criteria are the same ones a human reviewer would apply — this mirrors the
+pipeline documented (before any of it existed) in
+[docs/ai-pipeline.md](./ai-pipeline.md).
+
+**Duplicate-generation guard, in two layers.** The application checks the
+question count before ever calling Gemini (cheap, avoids wasting an API
+call), and `create_quiz_questions` independently re-checks and raises if
+the quiz already has questions — verified directly by calling the RPC a
+second time as the real owning teacher and confirming it's rejected
+without adding a duplicate row. The MVP resolution for "quiz already has
+questions" is the simpler option the product spec allowed for: require an
+explicit `clearGeneratedQuestions()` call first, not an automatic
+replace-in-place.
+
+**Upload UX honesty.** The panel's states (empty → file selected →
+uploading → processing → success/error) map to two real, separately
+awaited network calls (`uploadQuizPdf` then `generateQuestions`) — there's
+no timer-based fake progress and no state that claims to be "done" before
+its request actually resolved. The "AI processing" state shows one
+accurate message (the real requested MC/TF counts) rather than fabricated
+sub-phase timing that can't actually be observed from a single
+request/response Gemini call.
 
 ## Data-loading errors
 
@@ -157,18 +232,17 @@ code — currently just `proxy.ts` — that must degrade gracefully instead.
 
 ## AI pipeline isolation
 
-Gemini access is centralized behind a server-only service module (planned
-`src/lib/ai/`, built in Phase 4):
-
-```
-PDF (Supabase Storage) → Gemini request → raw JSON response
-  → Zod schema validation → application-level validation
-  (option counts, duplicate checks, correctness invariants)
-  → draft questions persisted to Postgres (status: draft)
-```
+Gemini access is centralized in `src/lib/gemini/` (built in Phase 4 — see
+"PDF upload and AI question generation" above for the full flow):
+`client.ts` (server-only `GoogleGenAI` instance, `GEMINI_API_KEY` via
+`getEnv()`), `prompt.ts`, `schema.ts` (Zod shape + derived JSON Schema for
+`responseJsonSchema`), `validate.ts` (the actual correctness authority).
+Only `src/lib/quizzes/generate-actions.ts` calls into it — no Gemini call
+happens outside a Server Action.
 
 Nothing downstream of "draft questions persisted" trusts the AI output
-further — the teacher review screen is the only path to `published`.
+further — the teacher review screen (Phase 5) is the only path to
+`published` (Phase 6).
 
 ## Correctness and randomization
 
@@ -207,7 +281,7 @@ src/
         new/                  Phase 3 — create-quiz form
         [id]/                 Phase 3 — draft detail (view/edit/delete)
           edit/                 Phase 3 — edit-quiz form (pre-filled)
-          _components/          delete-quiz-button.tsx (AlertDialog + Server Action)
+          _components/          delete-quiz-button.tsx, pdf-generation-panel.tsx (Phase 4)
         _components/          quiz-form.tsx — shared create/edit form
       results/              Empty-state shell, Phase 9/10 fill it in
       settings/             Read-only account info (real profile data)
@@ -223,16 +297,22 @@ src/
     quizzes/
       schema.ts              Phase 3 — Zod schema shared by create/edit
       actions.ts              Phase 3 — createQuiz/updateQuiz/deleteQuiz
+      pdf.ts                   Phase 4 — bucket/size/magic-byte constants + validation
+      generate-actions.ts       Phase 4 — uploadQuizPdf/generateQuestions/clearGeneratedQuestions
+    gemini/
+      client.ts               Phase 4 — server-only GoogleGenAI client
+      prompt.ts                Phase 4 — extraction prompt builder
+      schema.ts                 Phase 4 — Zod shape + derived JSON Schema for Gemini
+      validate.ts                Phase 4 — the actual correctness authority
     supabase/
       server.ts            Phase 1 — RLS-respecting server client (cookie-bound)
       client.ts             Phase 1 — browser client (Client Components)
       admin.ts               Phase 1 — service-role client (bypasses RLS)
       middleware.ts           Phase 1/2 — session refresh + claims for proxy.ts
       assert-no-error.ts       Phase 2 — throw-on-Supabase-error helper
-    ai/                     Phase 4 — Gemini service + schemas
   proxy.ts                 Phase 1/2 — session refresh + optimistic redirects
 supabase/
-  migrations/              Phase 1/2 — SQL schema + RLS + grants, via Supabase CLI
+  migrations/              Phase 1–4 — SQL schema + RLS + grants + Storage + RPC, via Supabase CLI
 docs/                     Reference documentation (this directory)
 ```
 

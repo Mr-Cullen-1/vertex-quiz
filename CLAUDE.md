@@ -53,7 +53,10 @@ non-negotiable and must not be weakened by any future feature.
 - **Database:** Supabase PostgreSQL with Row Level Security
 - **Auth:** Supabase Auth — teachers only; students are anonymous sessions
 - **Storage:** Supabase Storage — uploaded PDFs
-- **AI:** Google Gemini API, called server-side only
+- **AI:** Google Gemini API via `@google/genai` (the current official SDK —
+  the older `@google/generative-ai` is superseded), model
+  `gemini-flash-latest`. Called server-side only, from
+  `src/lib/gemini/` (Phase 4).
 - **Validation:** Zod, at every AI-output and user-input boundary
 - **Deployment:** Vercel · **Package manager:** npm
 
@@ -86,17 +89,26 @@ project:
   under an `(admin)` route group. Shell (login/dashboard/results/settings)
   built in Phase 2; quiz draft creation/editing/deletion
   (`/quizzes/new`, `/quizzes/[id]`, `/quizzes/[id]/edit`) added in Phase 3.
-  Server Components read data; Server Actions mutate it; business rules
+  quiz draft creation/editing/deletion (`/quizzes/new`, `/quizzes/[id]`,
+  `/quizzes/[id]/edit`) and PDF upload + Gemini question generation
+  (`generateQuestions`, `uploadQuizPdf`) added in Phase 3/4. Server
+  Components read data; Server Actions mutate it; business rules
   (ownership, publishing rules, correctness) are enforced server-side,
-  never trusted from the client. Quiz lifecycle: `draft →` (Phase 4 fills
-  in questions via Gemini) `→` (Phase 5 review/edit) `→` (Phase 6 publish)
-  `→ published → closed` — only the leftmost `draft` state exists so far;
-  see [docs/architecture.md](./docs/architecture.md) → "Quiz lifecycle".
+  never trusted from the client. Quiz lifecycle: `draft (metadata)` →
+  `draft (with generated questions, Phase 4 — done)` → (Phase 5
+  review/edit) → (Phase 6 publish) → `published → closed` — question
+  content isn't reviewable/editable yet, and nothing past `draft` exists
+  yet; see [docs/architecture.md](./docs/architecture.md) → "Quiz
+  lifecycle".
 - **Student app** — public, unauthenticated, lives under a `(student)` route
   group (added in Phase 7). Reached via `/join/{ACCESS_CODE}`. Interactive,
   game-inspired but not a Kahoot clone.
-- **AI pipeline** — isolated server-side service (Phase 4). Never called from
-  the client; the Gemini API key never leaves the server.
+- **AI pipeline** — isolated server-side service, `src/lib/gemini/`
+  (Phase 4, implemented). Never called from the client; the Gemini API key
+  never leaves the server. Gemini's raw output is Zod-shape-checked only —
+  `src/lib/gemini/validate.ts` is the actual correctness authority (exact
+  counts, exact answers, exact correctness), matching
+  [docs/ai-pipeline.md](./docs/ai-pipeline.md)'s original design.
 - Full detail: [docs/architecture.md](./docs/architecture.md) and
   [docs/ai-pipeline.md](./docs/ai-pipeline.md).
 
@@ -136,7 +148,14 @@ it needs an explicit `GRANT` migration too — don't assume Supabase does
 this automatically. Full story:
 [docs/database.md](./docs/database.md) → "Table privileges".
 
-Full verification logs (Phase 1 and Phase 2):
+**Phase 4 additions — no table/column changes:** a private `quiz-pdfs`
+Storage bucket + `storage.objects` RLS policies (same one-folder-per-owner
+pattern as every teacher-scoped table), and one Postgres function,
+`create_quiz_questions()`, so a whole Gemini-generated batch commits or
+rolls back atomically. Details: [docs/database.md](./docs/database.md) →
+"Storage and RPC".
+
+Full verification logs (Phase 1–4):
 [docs/development-progress.md](./docs/development-progress.md).
 
 ## 7. Development rules
@@ -229,9 +248,9 @@ confirmation to continue.
 | 0 | Project initialization | ✅ Done |
 | 1 | Supabase foundation (auth, schema, RLS) | ✅ Done — applied and verified on the real project |
 | 2 | Teacher authentication and dashboard | ✅ Done — verified end-to-end with a real login |
-| 3 | Create Quiz and PDF upload | 🟡 Quiz creation done — PDF upload not built yet |
-| 4 | Gemini AI extraction | Not started |
-| 5 | Question review and editor | Not started |
+| 3 | Create Quiz and PDF upload | ✅ Done — PDF upload landed as part of Phase 4 |
+| 4 | Gemini AI extraction | ✅ Done — verified end-to-end with a real PDF and a real Gemini call |
+| 5 | Question review and editor | ⏳ Next |
 | 6 | Quiz settings and publishing | Not started |
 | 7 | Student entry and session | Not started |
 | 8 | Student quiz experience | Not started |
@@ -239,13 +258,11 @@ confirmation to continue.
 | 10 | Analytics | Not started |
 | 11 | Final MVP polish | Not started |
 
-**Current phase:** 3 (create quiz) — the quiz-creation half is complete and
-verified end-to-end against the real Supabase project, including a real
-two-teacher RLS attack test. **PDF upload was intentionally not built in
-this pass** (explicitly out of scope for this Phase 3 request) — a teacher
-can create/edit/delete a draft's metadata and question-count structure,
-but there is no PDF ingestion yet.
-**Next phase:** PDF upload (the remainder of Phase 3) or Phase 4 — Gemini
-AI extraction, depending on how the human developer wants to sequence it.
+**Current phase:** 4 (Gemini AI extraction) — complete. A teacher can
+create a draft quiz, upload its source PDF, and generate its full set of
+Multiple Choice/True-False questions and answers via Gemini — verified
+with a real PDF, a real Gemini call, and a real cross-tenant Storage
+security test. Question *content* isn't reviewable/editable yet (Phase 5).
+**Next phase:** 5 — Question review and editor.
 
 Live status detail: [docs/development-progress.md](./docs/development-progress.md).

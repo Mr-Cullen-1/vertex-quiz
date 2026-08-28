@@ -4,23 +4,32 @@
 **applied to the real Supabase project** via `npx supabase db push`
 (2026-08-29). Phase 3 (quiz creation) required **no schema change** — it
 writes real rows into the existing `quizzes` table under the existing RLS.
-SQL migrations live under `supabase/migrations/`:
+Phase 4 (PDF + Gemini) added Storage configuration and one new Postgres
+function — no `quizzes`/`questions`/`answers` table/column changes; the
+`source_pdf_path` column it uses already existed from Phase 1. SQL
+migrations live under `supabase/migrations/`:
 
 - `20260829120000_create_core_schema.sql` — tables, indexes, constraints,
   triggers.
 - `20260829120100_enable_rls.sql` — Row Level Security policies.
 - `20260829120200_grant_teacher_table_privileges.sql` — table-level `GRANT`s
   for the `authenticated` role (Phase 2 fix — see "Table privileges" below).
+- `20260829120300_quiz_pdfs_storage.sql` — the `quiz-pdfs` Storage bucket
+  and its `storage.objects` RLS policies (Phase 4).
+- `20260829120400_create_quiz_questions_rpc.sql` — `create_quiz_questions()`,
+  the atomic question-batch insert Gemini generation writes through
+  (Phase 4).
 
-`npx supabase migration list` confirms all three are recorded as applied on
+`npx supabase migration list` confirms all five are recorded as applied on
 the remote (local and remote timestamps match). Everything below was
 independently re-verified by querying the live database directly
 (`supabase db query --linked`) — not just re-reading the migration files —
 including a functional test of the deferred answer-count trigger (insert
-invalid/valid answer sets inside a transaction, then roll back) and a real
-teacher login against the deployed app. See
-[development-progress.md](./development-progress.md) Phase 1 and Phase 2
-for the full verification logs and exact results.
+invalid/valid answer sets inside a transaction, then roll back), a real
+teacher login against the deployed app, and (Phase 4) a real PDF uploaded
+and processed through the actual running application. See
+[development-progress.md](./development-progress.md) Phase 1–4 for the
+full verification logs and exact results.
 
 ## Table privileges — a Phase 1 gap fixed in Phase 2
 
@@ -249,6 +258,31 @@ before any of the above run, and fails with one readable error listing
 every missing/invalid variable — see
 [architecture.md](./architecture.md#environment-configuration).
 
+## Storage and RPC (Phase 4)
+
+**`quiz-pdfs` bucket** — private (`public = false`), `application/pdf`
+only, 8 MB `file_size_limit`. Objects live at `{teacher_id}/{quiz_id}.pdf`;
+re-uploading the same quiz's PDF overwrites it (`upsert: true`). Four RLS
+policies on `storage.objects` (`quiz_pdfs_select_own` / `_insert_own` /
+`_update_own` / `_delete_own`), each requiring
+`(storage.foldername(name))[1] = auth.uid()::text` — the same
+one-folder-per-owner pattern as every other teacher-scoped table, just
+applied to Storage's own RLS-enabled table instead of an app table. No
+public/signed URL exists anywhere in this flow; every read/write goes
+through the authenticated server client.
+
+**`create_quiz_questions(p_quiz_id uuid, p_questions jsonb) returns setof
+questions`** — the atomic batch-insert Gemini-validated questions go
+through. `security invoker`, so it runs as the calling teacher and is
+still subject to the existing `questions`/`answers` RLS insert policies —
+it doesn't bypass anything, it just batches per-row inserts the caller
+could already do into one transaction. Raises (rolling back everything)
+if the caller doesn't own the quiz, or if the quiz already has questions.
+Explicitly granted `EXECUTE` to `authenticated` in the same migration
+(functions get `EXECUTE` granted to `PUBLIC` by default in Postgres,
+unlike tables — confirmed this still held here rather than assuming it,
+same discipline as the Phase 2 table-grants lesson).
+
 ## Migrations
 
 Applied via the Supabase CLI (`supabase link` then `supabase db push`). All
@@ -385,3 +419,67 @@ using two temporary teacher accounts (both deleted afterward).
 - Both temporary teacher accounts were deleted afterward via the Admin
   API; `auth.users`/`profiles`/`quizzes`/`participants` were all confirmed
   back to `0` rows.
+
+## Live verification — Phase 4 PDF + Gemini generation (2026-08-29)
+
+No migration changed `quizzes`/`questions`/`answers` — verification
+focused on the new Storage bucket, the new RPC, and a real PDF processed
+end to end through the actual running app (not a script calling Supabase
+directly, except where noted).
+
+- **Real Gemini call, real PDF**: generated a genuine multi-section
+  educational PDF (the water cycle) and sent it through the actual
+  extraction pipeline (`gemini-flash-latest`, the real prompt and
+  `responseJsonSchema`). Got back exactly 10 questions — exactly 7
+  `multiple_choice` (4 answers, 1 correct each) and exactly 3
+  `true_false` (2 answers — literally "True"/"False" — 1 correct each) —
+  every question and distractor traceable to the PDF's actual content, no
+  fabricated facts observed.
+- **Full app flow via a real browser** (Playwright/Chromium, not curl —
+  the upload/generate actions are plain async function calls from a
+  Client Component, not `<form action>` submissions, so there's no static
+  hidden-field action reference to replay the way earlier phases did):
+  logged in as a real teacher, created a 7 MC + 3 TF draft through the
+  real `/quizzes/new` form, uploaded the PDF through the real file input,
+  clicked "Upload & generate", and watched it reach "Generated 10
+  questions." The count persisted after a full page reload.
+- **Database records match exactly**: queried `questions`/`answers`
+  directly — 7 rows with `type = 'multiple_choice'` at `order_index`
+  0–6, each with exactly 4 answers and exactly 1 `is_correct = true`; 3
+  rows with `type = 'true_false'` at `order_index` 7–9, each with
+  exactly 2 answers and exactly 1 correct.
+- **Invalid file handling**: a non-PDF file (wrong extension) was
+  rejected client-side immediately ("Only PDF files are supported.") with
+  no network request. A file named `*.pdf` but containing garbage bytes
+  (browsers infer MIME type from the extension, so this one passes the
+  client-side check) was correctly rejected **server-side** by the
+  magic-byte check — "This file doesn't look like a valid PDF." — proving
+  the server never trusts the client-reported type alone.
+- **Duplicate-generation guard, both layers**: the app-level check
+  (queries the questions count before ever calling Gemini) is what a
+  teacher hits in the UI — confirmed the upload/generate controls
+  disappear entirely once a quiz has questions, replaced by a "Clear
+  generated questions" summary. Went a layer deeper and called
+  `create_quiz_questions` directly via PostgREST with the real owning
+  teacher's access token on a quiz that already had 10 questions — it
+  raised `"This quiz already has generated questions..."` and the
+  question count stayed at exactly 10 (no partial/duplicate row).
+  Regenerating after an explicit clear worked cleanly (10 fresh questions,
+  no leftovers from the previous batch).
+- **Storage security, positive and negative**: Teacher A downloaded her
+  own uploaded PDF successfully (3043 bytes, matching the original file
+  exactly) and could list her own folder. Teacher B's session, given
+  Teacher A's exact storage path, got `Object not found` on download and
+  an empty array listing Teacher A's folder — RLS makes another teacher's
+  file invisible, not merely "access denied" (same pattern as every other
+  cross-tenant check in this project).
+- **No secret leakage**: re-ran the `.next/static` grep for
+  `SUPABASE_SECRET_KEY` and, for the first time, `GEMINI_API_KEY` (its
+  first real usage) after a Phase 4 production build — zero matches for
+  either.
+- **Cleanup**: removed the two temporary teacher accounts and their
+  Storage objects (Storage objects are **not** cascade-deleted by the
+  `auth.users` foreign key — they were removed explicitly before deleting
+  the users) via the Admin API. Confirmed afterward: `auth.users` and
+  `quizzes` contain only the one pre-existing real account and its own
+  quiz, untouched throughout; the `quiz-pdfs` bucket is empty.

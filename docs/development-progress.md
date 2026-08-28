@@ -633,3 +633,141 @@ directly rather than by driving the dialog's UI.
 - Open browser devtools throughout — no console errors.
 
 **Manual Supabase configuration required:** none.
+
+---
+
+## Phase 4 — PDF upload + Gemini AI question generation ✅
+
+**Date:** 2026-08-29
+
+**What was built:**
+
+- **Gemini SDK choice**: inspected what's actually current before
+  installing anything — `@google/genai` (published days ago, actively
+  maintained, 96 versions) vs. the legacy `@google/generative-ai`
+  (unchanged for a year, explicitly superseded per its own maintainers).
+  Installed only `@google/genai`. Model: `gemini-flash-latest` — Google's
+  rolling alias for the current recommended Flash model, not a dated
+  snapshot, so this doesn't quietly go stale.
+- **Storage**: `supabase/migrations/20260829120300_quiz_pdfs_storage.sql`
+  — private `quiz-pdfs` bucket (`application/pdf` only, 8 MB limit) plus
+  four `storage.objects` RLS policies scoping each teacher to their own
+  `{teacher_id}/` folder. No app table/column changes —
+  `quizzes.source_pdf_path` already existed from Phase 1.
+- **Atomic insert**:
+  `supabase/migrations/20260829120400_create_quiz_questions_rpc.sql` — a
+  `create_quiz_questions()` Postgres function so a whole generated batch
+  (every question + its answers) commits or rolls back together. Explicit
+  `GRANT EXECUTE ... TO authenticated` even though Postgres grants
+  `EXECUTE` to `PUBLIC` by default (unlike tables) — didn't assume, and
+  verified after applying.
+- **PDF validation**: `src/lib/quizzes/pdf.ts` — 8 MB cap, empty-file
+  rejection, and a magic-byte check (`%PDF`) rather than trusting the
+  browser-reported MIME type, which is inferred from the file extension
+  and easy to get wrong.
+- **Gemini pipeline**: `src/lib/gemini/` — `client.ts` (server-only,
+  `GEMINI_API_KEY` via `getEnv()`), `prompt.ts` (the structured extraction
+  prompt: exact MC/TF counts, PDF-grounded only, exact answer shape per
+  type), `schema.ts` (a deliberately loose Zod shape — 2–4 answers, no
+  discriminated union — converted to JSON Schema via `z.toJSONSchema()`
+  for `responseJsonSchema`; kept simple since Gemini's structured-output
+  support is a constrained JSON Schema subset and the schema is never the
+  real authority anyway), `validate.ts` (the actual authority: exact
+  total/MC/TF counts, exact answer counts and correct-answer counts per
+  type, non-empty text, no duplicate MC options, True/False answers must
+  be literally "True"/"False" — any failure rejects the whole batch).
+- **Server Actions**: `src/lib/quizzes/generate-actions.ts` —
+  `uploadQuizPdf` (validates, stores via the RLS-scoped client, updates
+  `source_pdf_path`), `generateQuestions` (refuses if questions already
+  exist or no PDF is uploaded, downloads the PDF back from Storage, calls
+  Gemini, validates, calls the RPC), `clearGeneratedQuestions` (deletes a
+  draft's questions so it can be regenerated). All three explicitly
+  re-check session + quiz ownership + draft status, same pattern as
+  Phase 3's `actions.ts`.
+- **UI**: `pdf-generation-panel.tsx` on `/quizzes/[id]` — the 7 states
+  (empty → selected → uploading → processing → success/error, plus the
+  persisted "questions already generated" summary view) map to two real,
+  separately awaited requests (`uploadQuizPdf` then `generateQuestions`);
+  no fabricated progress percentages or sub-phase timers. "Clear generated
+  questions" uses the same `AlertDialog` confirm pattern as Phase 3's
+  delete-quiz flow.
+
+**No database schema change** — verified `source_pdf_path` already existed
+before writing any code; the only additions were Storage configuration and
+one Postgres function, both explicitly allowed by the task without needing
+to stop and ask.
+
+**Real end-to-end verification performed (not just code review):**
+
+- Generated a genuine multi-section educational PDF (pdfkit, temporary
+  dev-only dependency, not added to the project) and ran it through the
+  real extraction pipeline directly against Gemini first, in isolation, to
+  confirm the prompt/schema/model combination actually works before
+  wiring it into the app: got back exactly 10 questions (7 MC/3 TF),
+  correct shape, content genuinely grounded in the PDF.
+- **Full app flow via a real headless browser** (Playwright/Chromium —
+  installed temporarily, not a project dependency): the upload/generate
+  actions are plain async calls from a Client Component's `onClick`
+  handlers, not `<form action>` submissions, so earlier phases'
+  "extract the hidden action field and replay it with curl" technique
+  doesn't apply here — a real browser was the right tool. Logged in,
+  created a 7 MC + 3 TF draft through the real form, uploaded the PDF
+  through the real file input, clicked "Upload & generate", confirmed
+  "Generated 10 questions.", confirmed the summary persisted after a full
+  page reload, and confirmed the upload/generate UI disappears once
+  questions exist (replaced by the clear-questions summary).
+- **Database records verified directly**: 7 `multiple_choice` rows
+  (`order_index` 0–6, 4 answers/1 correct each), 3 `true_false` rows
+  (`order_index` 7–9, 2 answers/1 correct each) — exact match to what the
+  UI reported.
+- **Invalid file handling**: a wrong-extension file was rejected
+  client-side with no network request; a `.pdf`-named file with garbage
+  content (passes the client-side extension check) was rejected
+  server-side by the magic-byte check — confirmed via a direct debug
+  script after an initial flaky assertion in the main E2E script (the
+  underlying behavior was correct on inspection; the test script's own
+  selector, not the app, was the source of the flake).
+- **Duplicate-generation guard verified at both layers**: the UI hides
+  upload/generate entirely once a quiz has questions; separately, called
+  `create_quiz_questions` directly via PostgREST with the real teacher's
+  own access token on a quiz that already had 10 questions — rejected
+  with the expected message, question count stayed at exactly 10.
+  Clearing and regenerating afterward produced a clean 10-question batch
+  with no leftovers.
+- **Cross-tenant Storage security**: Teacher A downloaded her own PDF
+  successfully (byte-for-byte match); Teacher B's session, given Teacher
+  A's exact storage path, got `Object not found` on download and an empty
+  listing of Teacher A's folder.
+- **No secret leakage**: re-checked `.next/static` for both
+  `SUPABASE_SECRET_KEY` and `GEMINI_API_KEY` (its first real usage in the
+  app) after a Phase 4 build — zero matches.
+- **Cleanup**: deleted both temporary teacher accounts and their Storage
+  objects via the Admin API (Storage objects are **not**
+  cascade-deleted by the `auth.users` FK — removed explicitly first).
+  Confirmed the database and bucket afterward contain only the one
+  pre-existing real teacher account and quiz, completely untouched
+  throughout testing. All temporary scripts, the temporary test PDF, and
+  the temporary `pdfkit`/`playwright` dev tools were removed — neither
+  was added to `package.json`.
+
+**Validation:**
+
+- `npx tsc --noEmit` — no errors.
+- `npm run lint` — clean.
+- `npm run build` — succeeds (confirms `experimental.serverActions.bodySizeLimit: "9mb"` took effect, needed since the default Server Action body limit is 1 MB and PDFs go up to 8 MB).
+- `npm run lint:sql` — all 5 migrations (including the 2 new ones) parse as valid Postgres SQL.
+
+**Manually verify:**
+
+- Open a draft quiz with no PDF yet, upload a real PDF, and watch the
+  panel move through "Uploading PDF…" → "Analyzing your PDF and
+  generating N questions…" → the generated-questions summary.
+- Try a non-PDF file and a PDF over 8 MB — confirm clear, specific error
+  messages, not a generic failure.
+- With questions already generated, confirm there's no way to trigger
+  generation again without first clicking "Clear generated questions"
+  (with its confirm dialog).
+- Open browser devtools throughout — no console errors.
+
+**Manual Supabase configuration required:** none. The Storage bucket and
+its policies were created via migration, not the Dashboard.
