@@ -11,8 +11,28 @@ import { z } from "zod";
  * don't touch Supabase or Gemini working even before those credentials
  * exist, instead of crashing the whole app on an unrelated request.
  */
+/**
+ * zod's built-in `z.httpUrl()`/`z.url()` require a dotted, TLD-like
+ * hostname and reject bare hosts like `localhost` or `127.0.0.1` — which
+ * breaks the most common local-dev values (`http://localhost:3000`, or a
+ * locally-run `supabase start` at `http://127.0.0.1:54321`). This is a
+ * plain http(s)-only check instead.
+ */
+const httpUrl = (message: string) =>
+  z.string().refine(
+    (value) => {
+      try {
+        const protocol = new URL(value).protocol;
+        return protocol === "http:" || protocol === "https:";
+      } catch {
+        return false;
+      }
+    },
+    { error: message }
+  );
+
 const envSchema = z.object({
-  NEXT_PUBLIC_SUPABASE_URL: z.httpUrl(
+  NEXT_PUBLIC_SUPABASE_URL: httpUrl(
     "NEXT_PUBLIC_SUPABASE_URL must be a valid URL, e.g. https://xyzcompany.supabase.co"
   ),
   NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: z
@@ -22,7 +42,9 @@ const envSchema = z.object({
     .string()
     .min(1, "SUPABASE_SECRET_KEY is required — the 'service_role'/'secret' key from Supabase → Project Settings → API. Server-only, never exposed to the client."),
   GEMINI_API_KEY: z.string().min(1, "GEMINI_API_KEY is required"),
-  NEXT_PUBLIC_APP_URL: z.httpUrl().default("http://localhost:3000"),
+  NEXT_PUBLIC_APP_URL: httpUrl("NEXT_PUBLIC_APP_URL must be a valid http(s) URL").default(
+    "http://localhost:3000"
+  ),
 });
 
 export type Env = z.infer<typeof envSchema>;
