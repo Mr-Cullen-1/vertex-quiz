@@ -121,7 +121,7 @@ upload, Gemini, quiz/student flows, analytics) was touched.
 
 ---
 
-## Phase 1 — Supabase foundation ✅ (code + migrations — credentials pending)
+## Phase 1 — Supabase foundation ✅
 
 **Date:** 2026-08-29
 
@@ -248,3 +248,118 @@ be executed against a real or local Postgres instance.
   rejected by `validate_question_answers_trigger`.
 - Confirm RLS is listed as "Enabled" for all 7 tables in
   **Database → Tables**.
+
+---
+
+### Phase 1 addendum — env validation fix
+
+**Date:** 2026-08-29
+
+Once real Supabase credentials were added to `.env.local`, a targeted
+verification pass (`npx tsc --noEmit`, `npm run lint`, `npm run build`,
+plus a new `scripts/check-env.mjs` diagnostic that checks required env vars
+are present/well-formed without ever printing their values) surfaced a real
+bug: zod's built-in `z.httpUrl()`/`z.url()` require a dotted, TLD-like
+hostname and reject bare hosts like `localhost` or `127.0.0.1` — which
+would have broken the default `NEXT_PUBLIC_APP_URL=http://localhost:3000`
+and any locally-run Supabase instance (`supabase start`). Fixed in
+`src/lib/env.ts` and `scripts/check-env.mjs` by validating http(s) URLs via
+the `URL` constructor's `.protocol` instead of zod's hostname-strict
+helpers. Committed separately as `fix: support localhost app url
+validation` (`d0a7110`), verified before this addendum's migration work.
+
+### Phase 1 addendum — real migration applied and verified ✅
+
+**Date:** 2026-08-29
+
+With the real Supabase project created and `db push` run successfully by
+the user (`Applying migration 20260829120000_create_core_schema.sql` /
+`20260829120100_enable_rls.sql` / `Finished supabase db push`), performed a
+full independent verification directly against the **live** remote
+database — not a re-read of the migration files — using
+`npx supabase db query --linked` (ad hoc SQL files, cleaned up afterward;
+none of this queries or exposes any secret values).
+
+**Migration history:** `npx supabase migration list` shows both
+`20260829120000` and `20260829120100` with matching local/remote
+timestamps — confirmed applied.
+
+**Schema verification (all passed):**
+
+- All 7 tables present: `profiles`, `quizzes`, `questions`, `answers`,
+  `participants`, `quiz_sessions`, `responses`.
+- Every primary key is `id uuid`.
+- All 10 foreign keys present with the exact `ON DELETE` behavior from the
+  migration — 9 `CASCADE` (including `profiles.id → auth.users.id`, which
+  a naive `information_schema` join missed at first because it doesn't
+  handle the cross-schema reference cleanly; confirmed directly via
+  `pg_constraint` instead) and 1 `SET NULL`
+  (`responses.selected_answer_id → answers.id`).
+- All `timestamptz` columns, defaults (`now()`, `'draft'`, `'started'`,
+  `0`), and nullability match exactly.
+- All indexes present — `quizzes_teacher_id_idx`, `quizzes_status_idx`,
+  the two deferrable `(*, order_index)` unique indexes, the partial
+  `answers_question_id_correct_idx`, and every `quiz_id` /
+  `participant_id` / `session_id` / `question_id` lookup index.
+- All `CHECK` constraints present, including
+  `quizzes_question_counts_match`.
+- RLS (`relrowsecurity`) is `true` on all 7 tables.
+- All 17 RLS policies present, every one scoped to `{authenticated}` only
+  (no `anon` policy anywhere): 2 on `profiles` (select/update own), 4 each
+  full-CRUD on `quizzes` / `questions` / `answers` (ownership via
+  `is_quiz_owner()` / `is_question_owner()`), and exactly 1 `select`-only
+  policy each on `participants` / `quiz_sessions` / `responses` with **no**
+  write policy at all on those three — confirming student writes have no
+  path except through `src/lib/supabase/admin.ts`.
+- `is_quiz_owner()` / `is_question_owner()`: `security invoker`, `stable`,
+  `search_path = ''`. `handle_new_user()`: `security definer`,
+  `search_path = ''`. All as designed.
+- `validate_question_answers_trigger` and both order-index unique
+  constraint triggers confirmed `deferrable = true`,
+  `initially deferred = true`.
+
+**Functional test of the deferred answer trigger** — the part of this
+schema with no direct Postgres equivalent to fall back on, so it needed an
+actual live test, not just a definition check. Ran entirely inside
+`BEGIN; ... ROLLBACK;`: created a throwaway `auth.users` row (fires
+`handle_new_user()` → a real `profiles` row), a quiz, one `multiple_choice`
+and one `true_false` question, then tried five answer combinations,
+forcing the deferred trigger to check immediately after each
+(`SET CONSTRAINTS ALL IMMEDIATE`) and capturing pass/fail in a temp table
+(`RAISE NOTICE` output isn't visible through the Management API query
+path, so this was necessary to see results at all):
+
+| Case | Expected | Result |
+|---|---|---|
+| `multiple_choice`, 3 answers | rejected | ✅ rejected |
+| `multiple_choice`, 4 answers / 2 correct | rejected | ✅ rejected |
+| `multiple_choice`, 4 answers / 1 correct | accepted | ✅ accepted |
+| `true_false`, 2 answers / 2 correct | rejected | ✅ rejected |
+| `true_false`, 2 answers / 1 correct | accepted | ✅ accepted |
+
+All 5 matched. Immediately after the `ROLLBACK`, re-checked row counts on
+`profiles`/`quizzes`/`questions`/`answers`/`auth.users` — all `0`. No test
+or demo data left in the database.
+
+**Not tested:** live cross-teacher isolation with two real authenticated
+sessions — the verification connection runs as a privileged role that
+bypasses RLS by nature (it's how `db query --linked` works), so it can't
+simulate "logged in as teacher A". Ownership logic was instead verified by
+reading each policy's predicate directly (above), which confirms the logic
+is correct; an end-to-end multi-account check becomes possible once
+Phase 2's login flow exists.
+
+**Verification tooling:** the ad hoc SQL files used for this
+(`scripts/verify/*.sql`) were deleted after use — they were one-off
+diagnostic queries for this session, not a reusable tool like
+`scripts/lint-sql.mjs`/`scripts/check-env.mjs`, which stay.
+
+**Final Phase 1 checks:**
+
+- `npx tsc --noEmit` — no errors.
+- `npm run lint` — clean.
+- `npm run build` — succeeds; `ƒ Proxy (Middleware)` confirmed.
+
+**Phase 1 is complete.** The Supabase foundation (schema, RLS, client
+utilities, env validation) is implemented, applied to the real project, and
+independently verified end-to-end.

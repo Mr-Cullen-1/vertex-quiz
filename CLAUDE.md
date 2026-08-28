@@ -109,12 +109,17 @@ client server-side instead of an RLS policy. Correctness is always keyed by
 answer **ID**, never by letter (no `correct = "B"`). Full schema:
 [docs/database.md](./docs/database.md).
 
-**Not yet applied to a live Supabase project** — no project was configured
-as of Phase 1 (see §10). `NEXT_PUBLIC_SUPABASE_URL`,
-`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, and `SUPABASE_SECRET_KEY` in
-`.env.local` are still blank; the app degrades gracefully without them
-(see `src/lib/env.ts`, `isSupabaseConfigured()`) rather than assuming a
-connection that doesn't exist yet.
+**Applied to the real Supabase project** via `supabase db push`
+(2026-08-29) and independently re-verified against the live database —
+tables, PKs/FKs/`ON DELETE` behavior, indexes, `CHECK` constraints, RLS
+enabled + all 17 policies, and a live functional test of the deferred
+answer trigger (rolled back, no residual data). Full verification log:
+[docs/development-progress.md](./docs/development-progress.md) Phase 1.
+`.env.local` now holds real project credentials. The graceful-degradation
+path (`src/lib/env.ts`, `isSupabaseConfigured()`) stays in the code — it's
+what keeps the app from crashing in any environment where Supabase isn't
+configured (e.g. a fresh clone before `.env.local` is filled in), not a
+statement about the current environment.
 
 ## 7. Development rules
 
@@ -204,7 +209,7 @@ confirmation to continue.
 | # | Phase | Status |
 |---|-------|--------|
 | 0 | Project initialization | ✅ Done |
-| 1 | Supabase foundation (auth, schema, RLS) | ✅ Done (code + migrations — Supabase project credentials still needed, see §6) |
+| 1 | Supabase foundation (auth, schema, RLS) | ✅ Done — applied and verified on the real project |
 | 2 | Teacher authentication and dashboard | ⏳ Next |
 | 3 | Create Quiz and PDF upload | Not started |
 | 4 | Gemini AI extraction | Not started |
@@ -216,9 +221,8 @@ confirmation to continue.
 | 10 | Analytics | Not started |
 | 11 | Final MVP polish | Not started |
 
-**Current phase:** 1 (Supabase foundation) — code and migrations complete;
-waiting on real Supabase project credentials before Phase 2 can render any
-actual teacher data.
+**Current phase:** 1 (Supabase foundation) — complete. Migrations applied
+and verified against the real Supabase project.
 **Next phase:** 2 — Teacher authentication and dashboard.
 
 Live status detail: [docs/development-progress.md](./docs/development-progress.md).

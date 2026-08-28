@@ -1,22 +1,21 @@
 # Database
 
-**Status:** implemented in Phase 1 as SQL migrations under
+**Status:** implemented in Phase 1 and **applied to the real Supabase
+project** via `npx supabase db push` (2026-08-29). SQL migrations live under
 `supabase/migrations/`:
 
 - `20260829120000_create_core_schema.sql` — tables, indexes, constraints,
   triggers.
 - `20260829120100_enable_rls.sql` — Row Level Security policies.
 
-**Not yet verified against a live Postgres instance.** No Supabase project
-was configured when these migrations were written (no Docker/local Postgres
-was available in the dev environment either), so they have been validated
-the best way available short of that: parsed statement-by-statement with
-`libpg-query` (the real Postgres grammar, via `npm run lint:sql`) to catch
-syntax errors, and reviewed by hand for logic. They have **not** been
-executed against a real database. The first `supabase db push` (or running
-them via the Supabase SQL editor) is the real test — see
-[development-progress.md](./development-progress.md) Phase 1 for exactly
-what to watch for.
+`npx supabase migration list` confirms both are recorded as applied on the
+remote (local and remote timestamps match). Everything below was
+independently re-verified by querying the live database directly
+(`supabase db query --linked`) — not just re-reading the migration files —
+including a functional test of the deferred answer-count trigger (insert
+invalid/valid answer sets inside a transaction, then roll back). See
+[development-progress.md](./development-progress.md) Phase 1 for the full
+verification log and exact results.
 
 ## Principles
 
@@ -220,8 +219,57 @@ every missing/invalid variable — see
 
 ## Migrations
 
-Applied via the Supabase CLI (`supabase link` then `supabase db push`) once
-a project exists, or pasted into the Supabase SQL editor. Run
-`npm run lint:sql` first — it parses every file in `supabase/migrations/`
-with the real Postgres grammar (`libpg-query`) and fails fast on a syntax
-error, without needing a live database.
+Applied via the Supabase CLI (`supabase link` then `supabase db push`).
+Both migrations are live on the real project as of 2026-08-29 — confirmed
+by `npx supabase migration list` (local/remote timestamps match) and by
+querying the remote schema directly. Run `npm run lint:sql` before pushing
+any future migration — it parses every file in `supabase/migrations/` with
+the real Postgres grammar (`libpg-query`) and fails fast on a syntax error
+without needing a live database.
+
+## Live verification (2026-08-29)
+
+Every item below was checked against the real remote database via
+`supabase db query --linked`, not inferred from the migration files:
+
+- All 7 tables exist with `id uuid` primary keys.
+- All 10 foreign keys present with the exact `ON DELETE` behavior specified
+  above (9 `CASCADE`, 1 `SET NULL` on `responses.selected_answer_id`),
+  including `profiles.id → auth.users.id`.
+- All `timestamptz` columns, defaults (`now()`, `'draft'`, `'started'`, `0`),
+  and nullability match the migration exactly.
+- All indexes present, including the partial `answers (question_id) WHERE
+  is_correct` index and both deferrable unique `(*, order_index)`
+  constraints (confirmed `deferrable = true`, `initially deferred = true`
+  at the trigger level).
+- All `CHECK` constraints present, including
+  `quizzes_question_counts_match`.
+- RLS is enabled (`relrowsecurity = true`) on all 7 tables.
+- All 17 policies present and scoped to the `authenticated` role only (no
+  `anon` policy exists anywhere) — 2 on `profiles`, 4 each on `quizzes` /
+  `questions` / `answers` (full CRUD via `is_quiz_owner()` /
+  `is_question_owner()`), and exactly 1 `select`-only policy each on
+  `participants` / `quiz_sessions` / `responses`, with **no**
+  insert/update/delete policy on those three tables for any role — every
+  student-facing write is required to go through `src/lib/supabase/admin.ts`.
+- `is_quiz_owner()` / `is_question_owner()` are `security invoker`,
+  `stable`, `search_path = ''`; `handle_new_user()` is `security definer`,
+  `search_path = ''`.
+- **Functional test of `validate_question_answers_trigger`**, run inside a
+  transaction that was rolled back afterward (a throwaway `auth.users` row,
+  quiz, questions, and answer sets — nothing persisted): a `multiple_choice`
+  question with 3 answers was rejected, one with 4 answers/2 correct was
+  rejected, one with exactly 4 answers/1 correct was accepted; a
+  `true_false` question with 2 correct answers was rejected, one with
+  exactly 1 correct was accepted. All 5 cases matched the expected
+  behavior. Row counts on `profiles`/`quizzes`/`questions`/`answers`/
+  `auth.users` were confirmed at 0 immediately after — no residual data.
+
+Not independently tested: cross-teacher isolation via two real
+authenticated sessions (the verification connection runs as a privileged
+role that bypasses RLS, so it can't simulate "logged in as teacher A vs.
+B"). Ownership is instead verified by reading each policy's predicate
+directly (`teacher_id = auth.uid()` / `is_quiz_owner(...)` /
+`is_question_owner(...)`), which is sufficient to confirm the logic is
+correct; a live multi-account check can happen naturally once Phase 2's
+login flow exists.
