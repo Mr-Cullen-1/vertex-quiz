@@ -83,10 +83,11 @@ project:
 ## 5. Architecture
 
 - **Admin (teacher) app** — SaaS dashboard, Supabase-authenticated, lives
-  under an `(admin)` route group (added in Phase 2). Server Components read
-  data; Server Actions mutate it; business rules (ownership, publishing
-  rules, correctness) are enforced server-side, never trusted from the
-  client.
+  under an `(admin)` route group (login/dashboard/quizzes/results/settings
+  shell built in Phase 2; quiz creation/editing logic itself lands in
+  Phase 3+). Server Components read data; Server Actions mutate it;
+  business rules (ownership, publishing rules, correctness) are enforced
+  server-side, never trusted from the client.
 - **Student app** — public, unauthenticated, lives under a `(student)` route
   group (added in Phase 7). Reached via `/join/{ACCESS_CODE}`. Interactive,
   game-inspired but not a Kahoot clone.
@@ -113,13 +114,26 @@ answer **ID**, never by letter (no `correct = "B"`). Full schema:
 (2026-08-29) and independently re-verified against the live database —
 tables, PKs/FKs/`ON DELETE` behavior, indexes, `CHECK` constraints, RLS
 enabled + all 17 policies, and a live functional test of the deferred
-answer trigger (rolled back, no residual data). Full verification log:
-[docs/development-progress.md](./docs/development-progress.md) Phase 1.
-`.env.local` now holds real project credentials. The graceful-degradation
-path (`src/lib/env.ts`, `isSupabaseConfigured()`) stays in the code — it's
-what keeps the app from crashing in any environment where Supabase isn't
-configured (e.g. a fresh clone before `.env.local` is filled in), not a
-statement about the current environment.
+answer trigger (rolled back, no residual data). `.env.local` now holds real
+project credentials. The graceful-degradation path (`src/lib/env.ts`,
+`isSupabaseConfigured()`) stays in the code — it's what keeps the app from
+crashing in any environment where Supabase isn't configured (e.g. a fresh
+clone before `.env.local` is filled in), not a statement about the current
+environment.
+
+**Non-obvious gotcha, learned the hard way in Phase 2:** RLS policies do
+nothing if the underlying role has no table-level `GRANT`. This project's
+Supabase instance does **not** auto-expose new tables to
+`anon`/`authenticated` — Phase 1 assumed it would, and every real query
+silently failed with `permission denied` until
+`20260829120200_grant_teacher_table_privileges.sql` granted exactly what
+each table's RLS policies already allow. If a *new* table is ever added,
+it needs an explicit `GRANT` migration too — don't assume Supabase does
+this automatically. Full story:
+[docs/database.md](./docs/database.md) → "Table privileges".
+
+Full verification logs (Phase 1 and Phase 2):
+[docs/development-progress.md](./docs/development-progress.md).
 
 ## 7. Development rules
 
@@ -210,8 +224,8 @@ confirmation to continue.
 |---|-------|--------|
 | 0 | Project initialization | ✅ Done |
 | 1 | Supabase foundation (auth, schema, RLS) | ✅ Done — applied and verified on the real project |
-| 2 | Teacher authentication and dashboard | ⏳ Next |
-| 3 | Create Quiz and PDF upload | Not started |
+| 2 | Teacher authentication and dashboard | ✅ Done — verified end-to-end with a real login |
+| 3 | Create Quiz and PDF upload | ⏳ Next |
 | 4 | Gemini AI extraction | Not started |
 | 5 | Question review and editor | Not started |
 | 6 | Quiz settings and publishing | Not started |
@@ -221,8 +235,11 @@ confirmation to continue.
 | 10 | Analytics | Not started |
 | 11 | Final MVP polish | Not started |
 
-**Current phase:** 1 (Supabase foundation) — complete. Migrations applied
-and verified against the real Supabase project.
-**Next phase:** 2 — Teacher authentication and dashboard.
+**Current phase:** 2 (teacher authentication and dashboard) — complete.
+Login, protected routes, and the dashboard shell are live and verified
+end-to-end against the real Supabase project (including a real form
+submission through the actual Server Action, not just a library-level
+check).
+**Next phase:** 3 — Create Quiz and PDF upload.
 
 Live status detail: [docs/development-progress.md](./docs/development-progress.md).

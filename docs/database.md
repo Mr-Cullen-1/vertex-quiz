@@ -1,21 +1,51 @@
 # Database
 
-**Status:** implemented in Phase 1 and **applied to the real Supabase
-project** via `npx supabase db push` (2026-08-29). SQL migrations live under
-`supabase/migrations/`:
+**Status:** implemented in Phase 1, with one Phase 2 follow-up fix, and
+**applied to the real Supabase project** via `npx supabase db push`
+(2026-08-29). SQL migrations live under `supabase/migrations/`:
 
 - `20260829120000_create_core_schema.sql` — tables, indexes, constraints,
   triggers.
 - `20260829120100_enable_rls.sql` — Row Level Security policies.
+- `20260829120200_grant_teacher_table_privileges.sql` — table-level `GRANT`s
+  for the `authenticated` role (Phase 2 fix — see "Table privileges" below).
 
-`npx supabase migration list` confirms both are recorded as applied on the
-remote (local and remote timestamps match). Everything below was
+`npx supabase migration list` confirms all three are recorded as applied on
+the remote (local and remote timestamps match). Everything below was
 independently re-verified by querying the live database directly
 (`supabase db query --linked`) — not just re-reading the migration files —
 including a functional test of the deferred answer-count trigger (insert
-invalid/valid answer sets inside a transaction, then roll back). See
-[development-progress.md](./development-progress.md) Phase 1 for the full
-verification log and exact results.
+invalid/valid answer sets inside a transaction, then roll back) and a real
+teacher login against the deployed app. See
+[development-progress.md](./development-progress.md) Phase 1 and Phase 2
+for the full verification logs and exact results.
+
+## Table privileges — a Phase 1 gap fixed in Phase 2
+
+RLS policies only ever apply *after* Postgres checks whether the connecting
+role has the underlying table-level `GRANT` for that operation at all.
+Phase 1 assumed Supabase's usual behavior of auto-exposing new
+public-schema tables to the `anon`/`authenticated` PostgREST roles, with
+RLS as the only real gate. **That assumption was wrong for this project**:
+verified directly (Phase 2) that `authenticated` and `anon` had only
+`REFERENCES`/`TRIGGER`/`TRUNCATE` on every table — no `SELECT`, so every
+PostgREST request was rejected with `permission denied for table ...`
+before RLS was ever evaluated. This was caught by a real end-to-end login
+test against the deployed app, not by re-reading the schema.
+
+`20260829120200_grant_teacher_table_privileges.sql` grants `authenticated`
+exactly the operations its existing RLS policies already allow — no more:
+
+| Table | Grant |
+|---|---|
+| `quizzes`, `questions`, `answers` | `SELECT, INSERT, UPDATE, DELETE` |
+| `profiles` | `SELECT, UPDATE` (no `INSERT` — rows are created only by `handle_new_user()`) |
+| `participants`, `quiz_sessions`, `responses` | `SELECT` only |
+
+`anon` receives **no grants on any of these tables** — students never call
+Supabase directly from the browser, so there is nothing for `anon` to need.
+RLS itself, its 17 policies, and every ownership rule are unchanged by this
+migration; it only unblocks the access those policies already described.
 
 ## Principles
 
@@ -219,8 +249,8 @@ every missing/invalid variable — see
 
 ## Migrations
 
-Applied via the Supabase CLI (`supabase link` then `supabase db push`).
-Both migrations are live on the real project as of 2026-08-29 — confirmed
+Applied via the Supabase CLI (`supabase link` then `supabase db push`). All
+three migrations are live on the real project as of 2026-08-29 — confirmed
 by `npx supabase migration list` (local/remote timestamps match) and by
 querying the remote schema directly. Run `npm run lint:sql` before pushing
 any future migration — it parses every file in `supabase/migrations/` with
@@ -265,11 +295,55 @@ Every item below was checked against the real remote database via
   behavior. Row counts on `profiles`/`quizzes`/`questions`/`answers`/
   `auth.users` were confirmed at 0 immediately after — no residual data.
 
-Not independently tested: cross-teacher isolation via two real
-authenticated sessions (the verification connection runs as a privileged
-role that bypasses RLS, so it can't simulate "logged in as teacher A vs.
-B"). Ownership is instead verified by reading each policy's predicate
-directly (`teacher_id = auth.uid()` / `is_quiz_owner(...)` /
-`is_question_owner(...)`), which is sufficient to confirm the logic is
-correct; a live multi-account check can happen naturally once Phase 2's
-login flow exists.
+Not independently tested (at Phase 1 time): cross-teacher isolation via two
+real authenticated sessions (the verification connection runs as a
+privileged role that bypasses RLS, so it can't simulate "logged in as
+teacher A vs. B"). Ownership was instead verified by reading each policy's
+predicate directly (`teacher_id = auth.uid()` / `is_quiz_owner(...)` /
+`is_question_owner(...)`).
+
+## Live verification — Phase 2 grant fix (2026-08-29)
+
+Phase 2's teacher login/dashboard surfaced the missing-grants gap described
+above (a real `signInWithPassword` + PostgREST query returned
+`permission denied for table profiles`). After applying
+`20260829120200_grant_teacher_table_privileges.sql`, re-verified against
+the live database:
+
+- `authenticated` has exactly the grants in the table above on all 7
+  tables — checked via `information_schema.role_table_grants`.
+- `anon` is unchanged: still only `REFERENCES`/`TRIGGER`/`TRUNCATE` on
+  every table, confirming no privilege was accidentally widened for the
+  unauthenticated role.
+- RLS is still enabled on all 7 tables and the policy count is still
+  exactly **17** — the grant migration touched permissions only, not RLS.
+- **Real teacher login**, end to end, against the running app (not just the
+  Supabase SDK in isolation): submitted the actual `/login` form (the real
+  Server Action, with its real bound state and action id extracted from
+  the rendered page — not a mocked request) using a temporary test teacher
+  account, received a `303` redirect to `/dashboard` with a real session
+  cookie, then loaded `/dashboard`, `/quizzes`, `/results`, and `/settings`
+  with that cookie. Before the grant fix, the profile name silently fell
+  back to the account's email (a real value, not fake, but not the actual
+  answer) and every count/list silently showed `0`/empty due to the
+  swallowed permission error. After the fix, `/dashboard` and `/settings`
+  correctly showed the teacher's real name and account creation date from
+  `profiles`, and `/quizzes`/`/results` correctly queried (and got a
+  genuine empty result, not a permission error) since the test account had
+  no quizzes.
+- **Error handling verified, not just reviewed**: temporarily pointed a
+  page's query at a nonexistent table name (a code-only change, no
+  database access changed) to force a real Postgrest error, confirmed the
+  request now returns `500` instead of a fake `200`/"No quizzes yet", then
+  reverted the code. Confirms `src/lib/supabase/assert-no-error.ts` (added
+  in this fix) actually throws on a real query error instead of letting it
+  flow through as an empty/zero state.
+- The temporary test teacher account (and its auto-created `profiles` row)
+  was deleted via the Admin API after verification; `auth.users` and every
+  application table were confirmed back at their pre-test row counts.
+
+Still not independently tested: live cross-teacher isolation via two
+concurrently authenticated sessions (same limitation as Phase 1 — the
+verification tooling doesn't run as two distinct `authenticated` users at
+once). The policy predicates themselves are unchanged from Phase 1's
+verified definitions.

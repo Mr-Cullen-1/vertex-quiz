@@ -363,3 +363,149 @@ diagnostic queries for this session, not a reusable tool like
 **Phase 1 is complete.** The Supabase foundation (schema, RLS, client
 utilities, env validation) is implemented, applied to the real project, and
 independently verified end-to-end.
+
+---
+
+## Phase 2 — Teacher authentication and dashboard ✅
+
+**Date:** 2026-08-29
+
+**What was built:**
+
+- **Auth:** `src/lib/auth/actions.ts` — `login`/`logout` Server Actions.
+  Email/password only (no social login, no magic links, no signup route —
+  matches the product spec, which lists "Login" but not "Sign up" for
+  teachers; accounts are provisioned outside the app). Zod-validated input,
+  friendly error messages for Supabase's common auth errors.
+- **Login page:** `src/app/login/` — server-checks for an existing session
+  (redirects to `/dashboard` if already signed in) and renders a client
+  form (`useActionState` for pending/error state) with the real Vertex logo.
+- **Route protection:** `src/proxy.ts` now does an optimistic redirect
+  (unauthenticated → `/login` for `/dashboard`, `/quizzes`, `/results`,
+  `/settings`; authenticated → `/dashboard` for `/login`), based on JWT
+  claims from `src/lib/supabase/middleware.ts`. `(admin)/layout.tsx`
+  independently re-verifies server-side on every request — the proxy check
+  is optimistic only, per Next's Data Access Layer guidance.
+- **Dashboard shell:** `(admin)/layout.tsx` (auth gate + profile load),
+  `_components/` (`sidebar-nav`, `desktop-sidebar`, `mobile-nav` — a
+  Sheet-based drawer, `header`, `page-title`, `stat-card`), `error.tsx`.
+  Sidebar: Dashboard / My Quizzes / Results, then Settings / Log out.
+  Header: mobile menu trigger, page title, teacher name/email, logout.
+- **Pages:** `/dashboard` (4 real stat cards — total/published quizzes,
+  participants, average score — plus a "Recent Quizzes" list or empty
+  state), `/quizzes` (full list or empty state, both Phase 2 scope — the
+  actual quiz *creation* flow behind "Create your first quiz" is Phase 3),
+  `/results` (empty state until sessions exist), `/settings` (real
+  name/email/member-since from `profiles`, not placeholder text).
+- Added shadcn `sheet`, `separator`, `input`, `label` components (base-ui
+  backed, matching Phase 0's `base-nova` style).
+
+**Blocker found and fixed — table privileges.** A real end-to-end login
+test (see below) surfaced that `authenticated`/`anon` had no `SELECT` (or
+any DML) grant on any of the 7 tables — Phase 1 had assumed Supabase
+auto-exposes new tables, which doesn't hold for this project. Stopped and
+reported this before touching migrations, per instruction. Added
+`supabase/migrations/20260829120200_grant_teacher_table_privileges.sql`
+granting `authenticated` exactly what its existing RLS policies already
+allow (full CRUD on `quizzes`/`questions`/`answers`, `SELECT, UPDATE` on
+`profiles`, `SELECT` only on `participants`/`quiz_sessions`/`responses`;
+nothing for `anon`). Applied via `supabase db push` and re-verified — see
+docs/database.md's "Table privileges" and "Live verification — Phase 2
+grant fix" sections for the full detail, including the exact `403` error
+that first exposed the gap and the before/after real-login comparison.
+
+**Error handling fix.** Before the grant fix, every affected page still
+returned `200` with misleading zeros/empty states, because query errors
+were never checked. Added `src/lib/supabase/assert-no-error.ts` (throws on
+a Supabase error) and call it after every data-affecting query in
+`dashboard`, `quizzes`, `results`, and `settings` pages, so a real error
+now surfaces through `(admin)/error.tsx` as a `500` instead of a fake
+success. Verified this actually works by temporarily pointing a query at a
+nonexistent table (a code-only change, immediately reverted) and
+confirming a `500` instead of `200`.
+
+**Other fixes found during verification:**
+
+- `z.httpUrl()`/`.select() render={<Button asChild>}`-style Radix
+  conventions don't apply to this project's base-ui-backed shadcn
+  components — `asChild` isn't a prop; the equivalent is
+  `<Button render={<Link href="..." />}>`. Fixed 4 call sites across
+  `dashboard`/`quizzes` pages that initially used the (nonexistent)
+  `asChild` API, caught by `tsc`.
+- Base UI warned in the browser console that those same `Button`+`Link`
+  combinations needed `nativeButton={false}` (a `<Button render={<Link>}>`
+  renders an `<a>`, not a `<button>`, so button-specific semantics should
+  be turned off) — fixed on all 4.
+- `Settings`'s "Member since" date used `toLocaleDateString(undefined, …)`,
+  which formats using the server's OS locale rather than the app's English
+  UI — confirmed via a real request that it silently rendered in Russian
+  on this machine. Fixed to an explicit `"en-US"` locale.
+
+**Real end-to-end verification performed (not just code review):**
+
+- Created a temporary test teacher via the Admin API (`email_confirm:
+  true`, so it works regardless of the project's email-confirmation
+  setting — no Supabase Dashboard change was needed).
+- Confirmed `handle_new_user()` fired correctly in production (`profiles`
+  row appeared with the right `full_name`).
+- Submitted the **real** `/login` form — extracted the actual Server
+  Action id/bound-state/action-key from the rendered page and posted a
+  real `multipart/form-data` request matching what the browser's
+  progressive-enhancement path sends — and got a real `303` to
+  `/dashboard` with a real session cookie back from Supabase Auth.
+- Loaded `/dashboard`, `/quizzes`, `/results`, `/settings` with that
+  cookie: all `200`, all showing real data (teacher name, `0` counts that
+  are genuinely zero, "No quizzes yet" that's genuinely no quizzes).
+- Verified logout: submitted the real logout Server Action, got a
+  `Set-Cookie: ...auth-token=; Max-Age=0` clearing the session and a `303`
+  to `/login`; confirmed `/dashboard` redirected to `/login` again
+  afterward.
+- Verified unauthenticated protection: `/dashboard`, `/quizzes`,
+  `/results`, `/settings` all `307` to `/login` with no session cookie.
+- Verified no secret leakage: grepped `.next/static` (client bundles) for
+  the literal `SUPABASE_SECRET_KEY` and `GEMINI_API_KEY` values after a
+  production build — zero matches in both cases.
+- Deleted the temporary test teacher via the Admin API afterward and
+  confirmed `auth.users`/`profiles`/`quizzes`/`participants` row counts
+  were all back to `0` — no residual test data.
+
+**Not automated (left for manual verification, as the task itself
+expected):** the actual browser click-through — visual rendering of the
+mobile drawer, hover/focus states, and the rendered content of the custom
+`error.tsx` UI (Next.js streams error boundaries to the client for the
+browser's React runtime to mount; a non-JS `curl` client can prove the
+request failed correctly but can't render the final React tree).
+
+**Validation:**
+
+- `npx tsc --noEmit` — no errors.
+- `npm run lint` — clean.
+- `npm run build` — succeeds; routes list shows `/login`, `/dashboard`,
+  `/quizzes`, `/results`, `/settings` all dynamic (`ƒ`), `/` and the two
+  icon routes still static (`○`), `ƒ Proxy (Middleware)` confirmed.
+- `npm run lint:sql` — all 3 migrations (including the new grant one)
+  parse as valid Postgres SQL.
+
+**Manually verify:**
+
+- Create a real teacher account (Supabase Dashboard → Authentication →
+  Users → Add user, with "Auto Confirm User" checked, or via
+  `supabase.auth.admin.createUser` with `email_confirm: true`) and sign in
+  at `/login` in an actual browser.
+- Click through the sidebar (Dashboard / My Quizzes / Results / Settings)
+  and confirm the active-item highlight updates and the page title in the
+  header changes to match.
+- Resize to a mobile width and confirm the sidebar collapses into a
+  hamburger-triggered drawer (top-left of the header) that closes when you
+  tap a nav item or the backdrop.
+- Log out from both the sidebar and the header logout button; confirm you
+  land on `/login` and can't navigate back into `/dashboard` without
+  signing in again.
+- Open browser devtools while doing all of the above — no console errors.
+
+**Manual Supabase configuration required:** none. The only blocker found
+(missing table grants) was fixed via a migration, not a Dashboard setting.
+Email confirmation status doesn't matter for testing, since
+`email_confirm: true` on `createUser` sidesteps it — but note that a
+teacher signing up some *other* way (there isn't one in this MVP) would be
+subject to whatever the project's email-confirmation setting is.

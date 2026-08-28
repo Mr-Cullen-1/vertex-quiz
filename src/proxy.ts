@@ -1,17 +1,38 @@
-import type { NextRequest } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import { updateSession } from "@/lib/supabase/middleware";
 
 /**
  * Runs on every request (see `matcher` below) to keep the Supabase auth
- * cookie fresh. Next.js 16 renamed `middleware.ts`/`middleware` to
- * `proxy.ts`/`proxy` — see CLAUDE.md §4.
+ * cookie fresh and perform optimistic route redirects. Next.js 16 renamed
+ * `middleware.ts`/`middleware` to `proxy.ts`/`proxy` — see CLAUDE.md §4.
  *
- * This performs no route protection by itself (there are no protected
- * routes yet — the (admin) route group arrives in Phase 2). Real
- * authorization always happens server-side at the data layer via RLS.
+ * This is an *optimistic* check only (cookie-derived claims, no DB call) —
+ * per the Next.js Data Access Layer guidance, it is not the only thing
+ * protecting teacher data. The `(admin)` layout re-verifies auth
+ * server-side on every request regardless of what happens here, and every
+ * table is additionally scoped by Row Level Security.
  */
+const PROTECTED_PATHS = ["/dashboard", "/quizzes", "/results", "/settings"];
+
+function isProtectedPath(pathname: string): boolean {
+  return PROTECTED_PATHS.some(
+    (path) => pathname === path || pathname.startsWith(`${path}/`)
+  );
+}
+
 export default async function proxy(request: NextRequest) {
-  return updateSession(request);
+  const { response, claims } = await updateSession(request);
+  const { pathname } = request.nextUrl;
+
+  if (isProtectedPath(pathname) && !claims) {
+    return NextResponse.redirect(new URL("/login", request.url));
+  }
+
+  if (pathname === "/login" && claims) {
+    return NextResponse.redirect(new URL("/dashboard", request.url));
+  }
+
+  return response;
 }
 
 export const config = {
