@@ -14,7 +14,10 @@ type Quiz = {
   id: string;
   title: string;
   status: "draft" | "published" | "closed";
+  multiple_choice_count: number;
+  true_false_count: number;
   total_questions: number;
+  ends_at: string | null;
   created_at: string;
 };
 
@@ -24,11 +27,21 @@ const STATUS_LABEL: Record<Quiz["status"], string> = {
   closed: "Closed",
 };
 
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
 export default async function QuizzesPage() {
   const supabase = await createClient();
   const { data: quizzes, error } = await supabase
     .from("quizzes")
-    .select("id, title, status, total_questions, created_at")
+    .select(
+      "id, title, status, multiple_choice_count, true_false_count, total_questions, ends_at, created_at"
+    )
     .order("created_at", { ascending: false })
     .overrideTypes<Quiz[], { merge: false }>();
 
@@ -59,20 +72,29 @@ export default async function QuizzesPage() {
         {hasQuizzes ? (
           <ul className="flex flex-col divide-y divide-border">
             {quizzes!.map((quiz) => (
-              <li
-                key={quiz.id}
-                className="flex items-center justify-between gap-4 py-3 first:pt-0 last:pb-0"
-              >
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-medium text-foreground">
-                    {quiz.title}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    {quiz.total_questions} question
-                    {quiz.total_questions === 1 ? "" : "s"}
-                  </p>
-                </div>
-                <Badge variant="secondary">{STATUS_LABEL[quiz.status]}</Badge>
+              <li key={quiz.id}>
+                <Link
+                  href={`/quizzes/${quiz.id}`}
+                  className="flex items-center justify-between gap-4 py-3 first:pt-0 last:pb-0 focus-visible:rounded-md focus-visible:outline-2 focus-visible:outline-ring/50"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium text-foreground">
+                      {quiz.title}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {quiz.multiple_choice_count} Multiple Choice ·{" "}
+                      {quiz.true_false_count} True/False ·{" "}
+                      {quiz.total_questions} total · Created{" "}
+                      {formatDate(quiz.created_at)}
+                      {quiz.ends_at
+                        ? ` · Due ${formatDate(quiz.ends_at)}`
+                        : ""}
+                    </p>
+                  </div>
+                  <Badge variant="secondary" className="shrink-0">
+                    {STATUS_LABEL[quiz.status]}
+                  </Badge>
+                </Link>
               </li>
             ))}
           </ul>

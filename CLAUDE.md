@@ -83,11 +83,15 @@ project:
 ## 5. Architecture
 
 - **Admin (teacher) app** — SaaS dashboard, Supabase-authenticated, lives
-  under an `(admin)` route group (login/dashboard/quizzes/results/settings
-  shell built in Phase 2; quiz creation/editing logic itself lands in
-  Phase 3+). Server Components read data; Server Actions mutate it;
-  business rules (ownership, publishing rules, correctness) are enforced
-  server-side, never trusted from the client.
+  under an `(admin)` route group. Shell (login/dashboard/results/settings)
+  built in Phase 2; quiz draft creation/editing/deletion
+  (`/quizzes/new`, `/quizzes/[id]`, `/quizzes/[id]/edit`) added in Phase 3.
+  Server Components read data; Server Actions mutate it; business rules
+  (ownership, publishing rules, correctness) are enforced server-side,
+  never trusted from the client. Quiz lifecycle: `draft →` (Phase 4 fills
+  in questions via Gemini) `→` (Phase 5 review/edit) `→` (Phase 6 publish)
+  `→ published → closed` — only the leftmost `draft` state exists so far;
+  see [docs/architecture.md](./docs/architecture.md) → "Quiz lifecycle".
 - **Student app** — public, unauthenticated, lives under a `(student)` route
   group (added in Phase 7). Reached via `/join/{ACCESS_CODE}`. Interactive,
   game-inspired but not a Kahoot clone.
@@ -225,7 +229,7 @@ confirmation to continue.
 | 0 | Project initialization | ✅ Done |
 | 1 | Supabase foundation (auth, schema, RLS) | ✅ Done — applied and verified on the real project |
 | 2 | Teacher authentication and dashboard | ✅ Done — verified end-to-end with a real login |
-| 3 | Create Quiz and PDF upload | ⏳ Next |
+| 3 | Create Quiz and PDF upload | 🟡 Quiz creation done — PDF upload not built yet |
 | 4 | Gemini AI extraction | Not started |
 | 5 | Question review and editor | Not started |
 | 6 | Quiz settings and publishing | Not started |
@@ -235,11 +239,13 @@ confirmation to continue.
 | 10 | Analytics | Not started |
 | 11 | Final MVP polish | Not started |
 
-**Current phase:** 2 (teacher authentication and dashboard) — complete.
-Login, protected routes, and the dashboard shell are live and verified
-end-to-end against the real Supabase project (including a real form
-submission through the actual Server Action, not just a library-level
-check).
-**Next phase:** 3 — Create Quiz and PDF upload.
+**Current phase:** 3 (create quiz) — the quiz-creation half is complete and
+verified end-to-end against the real Supabase project, including a real
+two-teacher RLS attack test. **PDF upload was intentionally not built in
+this pass** (explicitly out of scope for this Phase 3 request) — a teacher
+can create/edit/delete a draft's metadata and question-count structure,
+but there is no PDF ingestion yet.
+**Next phase:** PDF upload (the remainder of Phase 3) or Phase 4 — Gemini
+AI extraction, depending on how the human developer wants to sequence it.
 
 Live status detail: [docs/development-progress.md](./docs/development-progress.md).

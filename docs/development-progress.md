@@ -509,3 +509,127 @@ Email confirmation status doesn't matter for testing, since
 `email_confirm: true` on `createUser` sidesteps it — but note that a
 teacher signing up some *other* way (there isn't one in this MVP) would be
 subject to whatever the project's email-confirmation setting is.
+
+---
+
+## Phase 3 — Quiz creation ✅
+
+**Date:** 2026-08-29
+
+**What was built:**
+
+- **Schema/validation:** `src/lib/quizzes/schema.ts` — a Zod schema shared
+  by create and edit: title (required, ≤200 chars), description (optional,
+  ≤2000 chars), `multipleChoiceCount`/`trueFalseCount` (integers ≥ 0),
+  optional time limit (1–480 minutes), optional deadline (must parse as a
+  valid date **and** be in the future), and a `.refine()` requiring
+  `multipleChoiceCount + trueFalseCount >= 1` — the 0 MC + 0 TF case the
+  spec calls out as invalid.
+- **Server Actions:** `src/lib/quizzes/actions.ts` — `createQuiz`,
+  `updateQuiz`, `deleteQuiz`. `total_questions` is always computed
+  server-side as `multipleChoiceCount + trueFalseCount`, never accepted
+  from the client. `teacher_id` on create always comes from
+  `getClaims().sub` (the verified session), never from the form — there is
+  no `teacher_id` field in the form to begin with. `updateQuiz`/`deleteQuiz`
+  both re-read the row first and refuse (`"Quiz not found."` /
+  `"Only draft quizzes can be edited/deleted."`) if RLS can't see it or its
+  status isn't `draft`.
+- **Routes:** `/quizzes/new` (create form), `/quizzes/[id]` (draft detail:
+  question structure, time limit, deadline, created date, Edit/Delete for
+  drafts), `/quizzes/[id]/edit` (same form, pre-filled, redirects to the
+  detail page if the quiz is somehow not a draft). `/quizzes` (the Phase 2
+  placeholder) now lists real quizzes — MC/TF/total/created/deadline,
+  newest first — instead of always showing the empty state.
+- **Shared form UX:** `_components/quiz-form.tsx` (used by both `new` and
+  `edit`) — `useActionState` for idle/submitting/error, a live-updating
+  "Total questions" readout as the teacher types MC/TF counts, Cancel link
+  back to the sensible previous page. Delete uses a shadcn `AlertDialog`
+  confirm step (added `alert-dialog`, `textarea` components) before
+  submitting — no accidental deletes from a single click.
+- Dashboard's and Quizzes' "Create your first quiz" / "New quiz" buttons,
+  wired to `/quizzes/new` since Phase 2 (as a not-yet-built route back
+  then), are now real working links.
+
+**No database migration** — Phase 3 writes into the existing `quizzes`
+table under the existing RLS policies and grants from Phase 1/2. Verified
+this holds up (see docs/database.md's "Live verification — Phase 3 quiz
+creation").
+
+**Real end-to-end verification performed:**
+
+- Created two temporary teacher accounts (Admin API, `email_confirm:
+  true`), signed in as each via the real `/login` form (same
+  action-id-extraction technique as Phase 2).
+- **Create:** submitted the real `/quizzes/new` form as Teacher A with 7
+  MC + 3 TF → `303` to `/quizzes/{id}` → confirmed in the database
+  (`multiple_choice_count: 7, true_false_count: 3, total_questions: 10,
+  status: 'draft', teacher_id` matching Teacher A) and on the rendered
+  detail page.
+- **Validation:** submitted 0 MC + 0 TF → `200` (no redirect) with "Add at
+  least one question — Multiple Choice or True/False" shown inline;
+  confirmed no row was created for that title.
+- **Constraint backstop:** inside a rolled-back transaction, inserted a row
+  with `total_questions` deliberately mismatched from
+  `multiple_choice_count + true_false_count` (bypassing app validation
+  entirely) — rejected by `quizzes_question_counts_match`; a matching valid
+  row was accepted. Nothing persisted.
+- **Edit:** submitted the real `/quizzes/[id]/edit` form, changing the mix
+  to 5 MC + 5 TF, adding a 45-minute time limit, and renaming the quiz →
+  `303` back to the detail page → confirmed all changes persisted.
+- **Delete:** deleted the quiz as its owner (via the same authorized
+  client the Server Action uses) → confirmed the row was gone and no
+  longer listed on `/quizzes`.
+- **Cross-tenant security — real second session, not just a code review:**
+  Teacher B, a separate authenticated session, got `404` on both
+  `/quizzes/{teacherA'sId}` and `/quizzes/{teacherA'sId}/edit`. Went
+  further and called the PostgREST API directly with Teacher B's own
+  access token: `SELECT` returned `[]`, `UPDATE` (attempting
+  `{"title":"HACKED BY TEACHER B"}`) returned `[]`/`200` with **zero rows
+  changed**, `DELETE` returned `[]`/`200` with **zero rows deleted**.
+  Re-read the quiz afterward and confirmed the title and status were
+  exactly as Teacher A left them.
+- Verified unauthenticated requests to `/quizzes/new` and
+  `/quizzes/{id}` still `307` to `/login` (already covered by the Phase 2
+  proxy's `/quizzes` prefix match — no proxy change needed for Phase 3).
+- Verified no secret leakage: re-ran the `.next/static` grep for
+  `SUPABASE_SECRET_KEY`/`GEMINI_API_KEY` values after the Phase 3 build —
+  zero matches.
+- Deleted both temporary teacher accounts afterward; confirmed
+  `auth.users`/`profiles`/`quizzes`/`participants` all back to `0` rows.
+
+**Not automated (left for manual/browser verification):** the delete
+confirmation dialog's actual click-through. `AlertDialogContent` renders
+into a portal that Base UI doesn't mount into the initial server HTML when
+closed, so a non-JS `curl` client never sees the delete form at all — only
+a real browser opens the dialog and reveals it. The underlying delete path
+was still fully verified (see above), just via the authorized client
+directly rather than by driving the dialog's UI.
+
+**Validation:**
+
+- `npx tsc --noEmit` — no errors (had to run `npx next typegen` once after
+  adding the `[id]` dynamic route folders — the `PageProps<"/quizzes/[id]">`
+  helper type didn't exist until route types were regenerated).
+- `npm run lint` — clean.
+- `npm run build` — succeeds; routes list shows `/quizzes/new`,
+  `/quizzes/[id]`, `/quizzes/[id]/edit` all dynamic (`ƒ`).
+- `npm run lint:sql` — all 3 existing migrations still parse (none added).
+
+**Manually verify:**
+
+- Log in as a real teacher, click "Create your first quiz" from either the
+  dashboard or `/quizzes`, and fill in the form — confirm the "Total
+  questions" number updates live as you type MC/TF counts.
+- Try submitting with both counts at 0 — confirm the inline error and that
+  the button re-enables after the failed submit.
+- Set a deadline in the past — confirm it's rejected ("Deadline must be in
+  the future").
+- After creating a quiz, click "Edit", change something, save, and confirm
+  the detail page reflects it immediately.
+- Click "Delete draft" and confirm the AlertDialog actually opens, shows
+  the quiz title, and both Cancel and the destructive Delete button behave
+  as expected (Cancel closes without deleting; Delete removes it and
+  returns to `/quizzes`).
+- Open browser devtools throughout — no console errors.
+
+**Manual Supabase configuration required:** none.

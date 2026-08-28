@@ -34,9 +34,10 @@ system of record besides Gemini.
   in Phase 2.
 - `app/(admin)/...` — teacher-facing SaaS dashboard: `/dashboard`,
   `/quizzes`, `/results`, `/settings`. Requires an authenticated Supabase
-  session, enforced by `(admin)/layout.tsx`. Added in Phase 2 (quiz
-  creation/editing/publishing inside `/quizzes` lands in Phase 3+; for now
-  those routes exist only as an empty-state shell + sidebar destination).
+  session, enforced by `(admin)/layout.tsx`. Shell added in Phase 2;
+  `/quizzes/new`, `/quizzes/[id]`, and `/quizzes/[id]/edit` (draft
+  creation/viewing/editing) added in Phase 3. AI extraction, the question
+  editor, and publishing still don't exist — see "Quiz lifecycle" below.
 - `app/(student)/join/[code]/...` — public student flow. No authentication;
   identity is a per-session token created on entry. Added in Phase 7.
 - `app/page.tsx` — minimal public landing/status page (Phase 0).
@@ -84,6 +85,43 @@ in the proxy alone cannot expose teacher data.
   server-only modules, guarded by the `server-only` package (a build-time
   error if a client bundle ever imports them) and validated centrally by
   `src/lib/env.ts` — never imported by a file that ships to the client.
+
+## Quiz lifecycle
+
+```
+draft ──(Phase 3, this)──> draft with question structure
+  │
+  ├─(Phase 4)─> Gemini extraction fills in questions (still draft)
+  ├─(Phase 5)─> teacher reviews/edits questions        (still draft)
+  └─(Phase 6)─> teacher publishes ──────────────────> published ──> closed
+```
+
+Phase 3 only implements the leftmost box: a teacher creates a `quizzes` row
+with a title, optional description, a fixed `multiple_choice_count` /
+`true_false_count` (and therefore `total_questions`), an optional
+`duration_minutes`, and an optional `ends_at` deadline. The row is always
+created with `status = 'draft'` — there is no code path that sets any other
+status yet, so `published`/`closed` are inert enum values until Phase 6.
+`total_questions` is always server-computed
+(`multiple_choice_count + true_false_count`), never taken from the client,
+and is additionally backstopped by the `quizzes_question_counts_match`
+`CHECK` constraint from Phase 1.
+
+A draft can be edited or deleted (`src/lib/quizzes/actions.ts`) — both
+operations first re-read the row through the RLS-scoped client and refuse
+if `status !== 'draft'`, so once Phase 6 introduces publishing, a published
+quiz automatically becomes un-editable/un-deletable through this code path
+without any additional change. Ownership is enforced twice: RLS
+(`quizzes_insert_own`/`update_own`/`delete_own`, all `teacher_id =
+auth.uid()`) is the actual boundary, and the Server Actions additionally
+re-check status/existence themselves so a rejected write surfaces a
+specific message ("Quiz not found." / "Only draft quizzes can be edited.")
+instead of a generic Postgres error.
+
+Nothing about *questions* exists yet — `questions`/`answers` rows aren't
+created until Phase 4 (Gemini) or Phase 5 (manual add). The `/quizzes/[id]`
+detail page shows the question *structure* the teacher chose (counts), not
+actual question content.
 
 ## Data-loading errors
 
@@ -165,7 +203,12 @@ src/
       layout.tsx            Auth gate + profile load + Sidebar/Header chrome
       error.tsx             Error boundary for every page below
       dashboard/            Stat cards + recent quizzes (real Supabase data)
-      quizzes/              "My Quizzes" — empty-state shell, Phase 3 fills it in
+      quizzes/              "My Quizzes" — real list (Phase 3), sorted newest first
+        new/                  Phase 3 — create-quiz form
+        [id]/                 Phase 3 — draft detail (view/edit/delete)
+          edit/                 Phase 3 — edit-quiz form (pre-filled)
+          _components/          delete-quiz-button.tsx (AlertDialog + Server Action)
+        _components/          quiz-form.tsx — shared create/edit form
       results/              Empty-state shell, Phase 9/10 fill it in
       settings/             Read-only account info (real profile data)
       _components/          Sidebar, Header, StatCard, mobile nav (Sheet-based)
@@ -177,6 +220,9 @@ src/
     env.ts                 Phase 1 — Zod-validated environment variables
     auth/
       actions.ts            Phase 2 — login/logout Server Actions
+    quizzes/
+      schema.ts              Phase 3 — Zod schema shared by create/edit
+      actions.ts              Phase 3 — createQuiz/updateQuiz/deleteQuiz
     supabase/
       server.ts            Phase 1 — RLS-respecting server client (cookie-bound)
       client.ts             Phase 1 — browser client (Client Components)

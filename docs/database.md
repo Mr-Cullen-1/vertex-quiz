@@ -2,7 +2,9 @@
 
 **Status:** implemented in Phase 1, with one Phase 2 follow-up fix, and
 **applied to the real Supabase project** via `npx supabase db push`
-(2026-08-29). SQL migrations live under `supabase/migrations/`:
+(2026-08-29). Phase 3 (quiz creation) required **no schema change** — it
+writes real rows into the existing `quizzes` table under the existing RLS.
+SQL migrations live under `supabase/migrations/`:
 
 - `20260829120000_create_core_schema.sql` — tables, indexes, constraints,
   triggers.
@@ -342,8 +344,44 @@ the live database:
   was deleted via the Admin API after verification; `auth.users` and every
   application table were confirmed back at their pre-test row counts.
 
-Still not independently tested: live cross-teacher isolation via two
-concurrently authenticated sessions (same limitation as Phase 1 — the
-verification tooling doesn't run as two distinct `authenticated` users at
-once). The policy predicates themselves are unchanged from Phase 1's
-verified definitions.
+Still not independently tested at Phase 2 time: live cross-teacher
+isolation via two concurrently authenticated sessions (the verification
+tooling didn't yet run as two distinct `authenticated` users at once) —
+this gap was closed in Phase 3 (below).
+
+## Live verification — Phase 3 quiz creation (2026-08-29)
+
+No migration in this phase — `quizzes` and its RLS policies/grants are
+unchanged. Verification focused on proving the existing schema now holds
+up under real writes, real edits, and a real cross-tenant attack attempt,
+using two temporary teacher accounts (both deleted afterward).
+
+- **`quizzes_question_counts_match` re-verified functionally**, inside a
+  rolled-back transaction: a direct insert with `multiple_choice_count: 7,
+  true_false_count: 3, total_questions: 999` (bypassing the application's
+  own Zod validation entirely) was rejected with
+  `violates check constraint "quizzes_question_counts_match"`; the matching
+  valid row (`total_questions: 10`) was accepted. Nothing persisted after
+  `ROLLBACK`.
+- **Real create → edit → delete cycle**, through the actual app (the real
+  `/quizzes/new` and `/quizzes/[id]/edit` Server Actions, not a direct SDK
+  call): created a quiz as 7 MC + 3 TF, confirmed `total_questions = 10`
+  and `status = 'draft'` in the database; edited it to 5 MC + 5 TF plus a
+  45-minute time limit and confirmed the change persisted; deleted it and
+  confirmed the row was gone.
+- **Cross-tenant isolation — now tested with two real concurrent
+  sessions**, closing the Phase 1/2 gap: Teacher A created a quiz; Teacher
+  B (a second, independent authenticated session) got `404` loading both
+  `/quizzes/[id]` and `/quizzes/[id]/edit` for it (RLS makes another
+  teacher's row indistinguishable from a nonexistent one). Went one level
+  deeper than the app layer: called the PostgREST API directly with
+  Teacher B's own access token — `SELECT`, `UPDATE`
+  (`{"title":"HACKED BY TEACHER B"}`), and `DELETE` on Teacher A's quiz id
+  all returned `[]` (zero rows matched, so nothing changed) with `HTTP
+  200`. Re-read the row afterward and confirmed the title and status were
+  untouched. The same quiz, deleted by its actual owner (Teacher A) via
+  the same REST path, succeeded normally — the boundary is ownership, not
+  a blanket lockout.
+- Both temporary teacher accounts were deleted afterward via the Admin
+  API; `auth.users`/`profiles`/`quizzes`/`participants` were all confirmed
+  back to `0` rows.
