@@ -151,13 +151,36 @@ Tailwind's `@theme inline`, following shadcn/ui conventions (`bg-primary`,
 - **Sidebar:** intentionally dark navy in both light and dark mode, per the
   admin dashboard reference direction — the one deliberate exception to the
   light/white admin surface.
+- **Radius:** `0.5rem` base — slightly tighter than shadcn's default, to
+  read more precise/premium in line with the logo's angular geometry.
 - **Admin surface:** professional SaaS/analytics feel, restrained rounded
-  corners, generous whitespace.
+  corners, generous whitespace, one controlled accent used for emphasis
+  only (not color-coding every card).
 - **Student surface:** same token system, but layouts should feel more
   interactive/game-like (large question, prominent timer/progress, clear
   selection state) — inspired by Kahoot's energy, not a copy of its look.
 - Rounded corners, spacing, and color usage should stay restrained — color
-  communicates status/interaction/AI-processing, not decoration.
+  communicates status/interaction/AI-processing, not decoration. Avoid
+  excessive gradients, shadows, or glassmorphism, and avoid a generic
+  "AI landing page" or childish-EdTech look.
+
+### Brand assets
+
+The real Vertex Studio logo (an angular "V" mark, white on a solid black
+square — no transparency) is used as-is, never recreated or substituted with
+a text placeholder:
+
+- Source archive: `photos/logo.png`
+- Shipped copy: `public/brand/logo.png` (rendered via `next/image`)
+- Favicon: `src/app/icon.png` · Apple touch icon: `src/app/apple-icon.png`
+
+Because the source file has no alpha channel, the logo is always displayed
+at a small fixed size with rounded corners (a "logo chip"), not stretched or
+placed on a background that would expose its square edges as an artifact.
+
+Full provenance and the extracted visual-reference principles (from
+`photos/style.webp`, a third-party dashboard used as inspiration only, never
+copied into `public/`): [REFERENCES.md](./REFERENCES.md).
 
 ## 10. Development phases
 

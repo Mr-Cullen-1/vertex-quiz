@@ -1,3 +1,4 @@
+import Image from "next/image";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -53,9 +54,14 @@ export default function Home() {
       <header className="border-b border-border">
         <div className="mx-auto flex w-full max-w-5xl items-center justify-between px-6 py-5">
           <div className="flex items-center gap-2.5">
-            <div className="flex size-8 items-center justify-center rounded-md bg-primary text-primary-foreground">
-              <span className="text-sm font-semibold">V</span>
-            </div>
+            <Image
+              src="/brand/logo.png"
+              alt="Vertex Studio"
+              width={36}
+              height={36}
+              priority
+              className="rounded-md"
+            />
             <div className="leading-tight">
               <p className="text-sm font-semibold text-foreground">
                 Vertex Quiz

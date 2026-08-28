@@ -87,7 +87,11 @@
   --chart-3: oklch(0.75 0.15 75);
   --chart-4: oklch(0.58 0.22 27.33);
   --chart-5: oklch(0.51 0.03 260.03);
-  --radius: 0.625rem;
+  /* Slightly tighter than shadcn's 0.625rem default — reads more precise and
+     premium, in line with the Vertex mark's angular geometry and the
+     restrained corner radius in the admin visual reference (see
+     REFERENCES.md). */
+  --radius: 0.5rem;
   /* Admin sidebar stays dark navy in both themes — matches the design reference. */
   --sidebar: oklch(0.19 0.035 265.75);
   --sidebar-foreground: oklch(0.9 0.01 264.53);
