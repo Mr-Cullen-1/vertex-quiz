@@ -19,9 +19,25 @@ function parseQuizForm(formData: FormData) {
   });
 }
 
+/**
+ * Maps a raw Supabase error to a teacher-friendly message. Always logs the
+ * raw message server-side first — swallowing it entirely (as this used to
+ * do) turns every unrecognized failure into an undiagnosable "something
+ * went wrong", which is exactly the silent-failure pattern the rest of
+ * this app's data-loading code (`assertNoError`) exists to avoid.
+ */
 function friendlyDbError(message: string): string {
+  console.error("Quiz save failed:", message);
   if (message.includes("quizzes_question_counts_match")) {
     return "Total questions must equal Multiple Choice + True/False.";
+  }
+  if (message.includes("quizzes_teacher_id_fkey")) {
+    // A JWT can still pass local verification (getClaims()) for a few
+    // minutes after the underlying auth.users row is gone — e.g. a
+    // deleted/rotated test account whose session cookie is still cached in
+    // the browser. The insert then fails this foreign key instead of the
+    // auth check, which otherwise looks like an opaque server error.
+    return "We couldn't verify your account. Please sign out and sign in again.";
   }
   return "Something went wrong saving the quiz. Please try again.";
 }
