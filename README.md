@@ -49,7 +49,7 @@ Open [http://localhost:3000](http://localhost:3000).
 ## Environment variables
 
 See [.env.example](./.env.example). `GEMINI_API_KEY` and
-`SUPABASE_SERVICE_ROLE_KEY` are server-only secrets and must never be
+`SUPABASE_SECRET_KEY` are server-only secrets and must never be
 prefixed with `NEXT_PUBLIC_` or referenced from client code.
 
 ## Project status

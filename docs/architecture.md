@@ -35,21 +35,49 @@ system of record besides Gemini.
   identity is a per-session token created on entry. Added in Phase 7.
 - `app/page.tsx` — minimal public landing/status page (Phase 0).
 
-Route protection for `(admin)` uses the Next.js 16 `proxy.ts` convention
-(exported `proxy` function), not the deprecated `middleware.ts`.
+Route protection uses the Next.js 16 `proxy.ts` convention (exported
+`proxy` function, at `src/proxy.ts` — same level as `src/app`), not the
+deprecated `middleware.ts`. As of Phase 1, `proxy.ts` only refreshes the
+Supabase auth session cookie on every request (via
+`src/lib/supabase/middleware.ts`) — there is nothing to redirect yet, since
+`(admin)` doesn't exist until Phase 2. It no-ops when Supabase isn't
+configured (see Environment configuration below), so the app keeps working
+before real credentials exist. Proxy-level checks are optimistic in any
+case: real authorization always happens at the data layer via RLS, per the
+Next.js authentication guide's Data Access Layer guidance
+(`node_modules/next/dist/docs/01-app/02-guides/authentication.md`).
 
 ## Server/client boundary
 
-- Server Components read data directly via a server-side Supabase client.
+- Server Components read data directly via a server-side Supabase client
+  (`src/lib/supabase/server.ts`, RLS-respecting).
 - Mutations go through **Server Actions** (teacher dashboard forms, student
   quiz submission) or **Route Handlers** where a plain HTTP endpoint is a
   better fit (e.g. file upload, potential webhook-style calls).
 - Client Components are used only where interactivity requires it: quiz
   taking UI (timer, answer selection, transitions), question editor
-  interactions, file upload progress.
-- The Gemini API key and the Supabase service-role key are read only inside
-  server-only modules (Server Actions / Route Handlers / server utilities in
-  `src/lib/*`) and are never imported by a file that ships to the client.
+  interactions, file upload progress. They get a Supabase client from
+  `src/lib/supabase/client.ts` when they need one directly (e.g. the Phase 2
+  login form).
+- Student-facing server code that must write to `participants` /
+  `quiz_sessions` / `responses` — tables with no RLS write policy for
+  anyone but the service role — uses `src/lib/supabase/admin.ts`. That
+  client bypasses RLS entirely, so the calling code is responsible for its
+  own authorization (validating a session token, checking expiry) before
+  using it.
+- The Gemini API key and the Supabase secret key are read only inside
+  server-only modules, guarded by the `server-only` package (a build-time
+  error if a client bundle ever imports them) and validated centrally by
+  `src/lib/env.ts` — never imported by a file that ships to the client.
+
+## Environment configuration
+
+`src/lib/env.ts` validates every required environment variable with Zod
+the first time `getEnv()` is called (not at import time, so a page that
+doesn't touch Supabase/Gemini keeps working even before those credentials
+exist) and throws one readable error listing everything missing/invalid.
+`isSupabaseConfigured()` offers a cheap, non-throwing presence check for
+code — currently just `proxy.ts` — that must degrade gracefully instead.
 
 ## AI pipeline isolation
 
@@ -93,15 +121,23 @@ src/
     layout.tsx            Root layout + metadata
     page.tsx              Public landing/status page
     globals.css           Design tokens (Tailwind v4 @theme)
-    icon.tsx              Generated favicon
+    icon.png, apple-icon.png  Favicon / Apple touch icon (real logo, Phase 0)
     (admin)/              Phase 2+
     (student)/join/[code]/ Phase 7+
   components/
     ui/                   shadcn/ui primitives
   lib/
     utils.ts              cn() helper (shadcn)
-    supabase/              Phase 1 — server/browser Supabase clients
+    env.ts                 Phase 1 — Zod-validated environment variables
+    supabase/
+      server.ts            Phase 1 — RLS-respecting server client (cookie-bound)
+      client.ts             Phase 1 — browser client (Client Components)
+      admin.ts               Phase 1 — service-role client (bypasses RLS)
+      middleware.ts           Phase 1 — session-refresh helper used by proxy.ts
     ai/                     Phase 4 — Gemini service + schemas
+  proxy.ts                 Phase 1 — session-refresh Proxy (see Route groups)
+supabase/
+  migrations/              Phase 1 — SQL schema + RLS, applied via Supabase CLI
 docs/                     Reference documentation (this directory)
 ```
 

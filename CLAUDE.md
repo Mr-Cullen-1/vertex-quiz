@@ -95,14 +95,26 @@ project:
 - Full detail: [docs/architecture.md](./docs/architecture.md) and
   [docs/ai-pipeline.md](./docs/ai-pipeline.md).
 
-## 6. Database structure (planned — implemented in Phase 1)
+## 6. Database structure (implemented — Phase 1)
 
 Core tables: `profiles`, `quizzes`, `questions`, `answers`, `participants`,
-`quiz_sessions`, `responses`. UUID primary keys, explicit foreign keys,
-timestamps, and constraints. Row Level Security scopes teachers to their own
-quizzes/data; students never see teacher/admin data. Correctness is always
-keyed by answer **ID**, never by letter (no `correct = "B"`). Full schema:
+`quiz_sessions`, `responses`, as SQL migrations under
+`supabase/migrations/`. UUID primary keys, explicit foreign keys,
+timestamps, and constraints — including a deferred constraint trigger
+enforcing the answer-count/correctness invariant per question (a backstop
+behind Zod + application validation, not a replacement for it). Row Level
+Security scopes teachers to their own quizzes/data; students never see
+teacher/admin data — student-facing writes go through a service-role admin
+client server-side instead of an RLS policy. Correctness is always keyed by
+answer **ID**, never by letter (no `correct = "B"`). Full schema:
 [docs/database.md](./docs/database.md).
+
+**Not yet applied to a live Supabase project** — no project was configured
+as of Phase 1 (see §10). `NEXT_PUBLIC_SUPABASE_URL`,
+`NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, and `SUPABASE_SECRET_KEY` in
+`.env.local` are still blank; the app degrades gracefully without them
+(see `src/lib/env.ts`, `isSupabaseConfigured()`) rather than assuming a
+connection that doesn't exist yet.
 
 ## 7. Development rules
 
@@ -123,7 +135,7 @@ keyed by answer **ID**, never by letter (no `correct = "B"`). Full schema:
 
 ## 8. Security rules
 
-- Never expose `SUPABASE_SERVICE_ROLE_KEY` or `GEMINI_API_KEY` to the client,
+- Never expose `SUPABASE_SECRET_KEY` or `GEMINI_API_KEY` to the client,
   and never prefix them with `NEXT_PUBLIC_`.
 - Secrets live in `.env.local` (gitignored); `.env.example` documents the
   shape only.
@@ -192,8 +204,8 @@ confirmation to continue.
 | # | Phase | Status |
 |---|-------|--------|
 | 0 | Project initialization | ✅ Done |
-| 1 | Supabase foundation (auth, schema, RLS) | ⏳ Next |
-| 2 | Teacher authentication and dashboard | Not started |
+| 1 | Supabase foundation (auth, schema, RLS) | ✅ Done (code + migrations — Supabase project credentials still needed, see §6) |
+| 2 | Teacher authentication and dashboard | ⏳ Next |
 | 3 | Create Quiz and PDF upload | Not started |
 | 4 | Gemini AI extraction | Not started |
 | 5 | Question review and editor | Not started |
@@ -204,7 +216,9 @@ confirmation to continue.
 | 10 | Analytics | Not started |
 | 11 | Final MVP polish | Not started |
 
-**Current phase:** 0 (initialization) — complete.
-**Next phase:** 1 — Supabase foundation.
+**Current phase:** 1 (Supabase foundation) — code and migrations complete;
+waiting on real Supabase project credentials before Phase 2 can render any
+actual teacher data.
+**Next phase:** 2 — Teacher authentication and dashboard.
 
 Live status detail: [docs/development-progress.md](./docs/development-progress.md).
