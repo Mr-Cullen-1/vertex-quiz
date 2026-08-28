@@ -1,36 +1,60 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Vertex Quiz
 
-## Getting Started
+AI-powered interactive quiz platform by **Vertex Studio**. A teacher uploads a
+structured educational PDF, Google Gemini drafts quiz questions from it, the
+teacher reviews and publishes the quiz, and students take it through a
+shareable link with just a first and last name.
 
-First, run the development server:
+> **AI never publishes a quiz automatically.** Gemini only produces a draft —
+> the teacher must review, edit, and explicitly publish it.
+
+## Tech stack
+
+| Layer          | Choice                                              |
+| -------------- | ---------------------------------------------------- |
+| Framework      | Next.js (App Router), TypeScript                     |
+| Styling        | Tailwind CSS                                         |
+| UI components  | shadcn/ui, Lucide React icons                        |
+| Backend        | Next.js Server Components, Server Actions, Route Handlers |
+| Database       | Supabase (PostgreSQL) with Row Level Security        |
+| Auth           | Supabase Auth (teachers only — students are anonymous sessions) |
+| Storage        | Supabase Storage (uploaded PDFs)                     |
+| AI             | Google Gemini API (server-side only)                 |
+| Validation     | Zod                                                   |
+| Deployment     | Vercel                                                |
+
+See [CLAUDE.md](./CLAUDE.md) for the full project context (principles,
+architecture, database, security rules, design system, and phase status), and
+[docs/](./docs) for deeper reference docs.
+
+## Getting started
 
 ```bash
+npm install
+cp .env.example .env.local   # fill in Supabase + Gemini credentials
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Scripts
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Command         | Purpose                          |
+| --------------- | --------------------------------- |
+| `npm run dev`   | Start the dev server (Turbopack)  |
+| `npm run build` | Production build                  |
+| `npm run start` | Run the production build          |
+| `npm run lint`  | Lint the codebase                 |
 
-## Learn More
+## Environment variables
 
-To learn more about Next.js, take a look at the following resources:
+See [.env.example](./.env.example). `GEMINI_API_KEY` and
+`SUPABASE_SERVICE_ROLE_KEY` are server-only secrets and must never be
+prefixed with `NEXT_PUBLIC_` or referenced from client code.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Project status
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Vertex Quiz is built in controlled phases; each phase is implemented, tested,
+documented, and committed before the next one begins. See
+[docs/development-progress.md](./docs/development-progress.md) for current
+status.
