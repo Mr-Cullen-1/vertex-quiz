@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { Pencil } from "lucide-react";
+import { ClipboardList, Pencil } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/server";
@@ -85,6 +85,14 @@ export default async function QuizDetailPage(
     .eq("quiz_id", quiz.id);
 
   assertNoError(questionCountError, "Failed to load question count");
+
+  const { count: reviewedCount, error: reviewedCountError } = await supabase
+    .from("questions")
+    .select("*", { count: "exact", head: true })
+    .eq("quiz_id", quiz.id)
+    .eq("review_status", "approved");
+
+  assertNoError(reviewedCountError, "Failed to load review progress");
 
   return (
     <div className="flex flex-col gap-6">
@@ -170,6 +178,27 @@ export default async function QuizDetailPage(
           hasSourcePdf={Boolean(quiz.source_pdf_path)}
           existingQuestionCount={questionCount ?? 0}
         />
+      ) : null}
+
+      {isDraft ? (
+        <div className="flex flex-col gap-3 rounded-xl bg-card p-6 ring-1 ring-foreground/10 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h3 className="text-sm font-semibold text-foreground">Question review</h3>
+            <p className="text-sm text-muted-foreground">
+              {(questionCount ?? 0) === 0
+                ? "No questions yet — generate them from a PDF above, or add one manually."
+                : `${questionCount} question${questionCount === 1 ? "" : "s"} · ${reviewedCount ?? 0} / ${questionCount} reviewed`}
+            </p>
+          </div>
+          <Button
+            size="sm"
+            nativeButton={false}
+            render={<Link href={`/quizzes/${quiz.id}/review`} />}
+          >
+            <ClipboardList className="size-4" />
+            Review questions
+          </Button>
+        </div>
       ) : null}
 
       {isDraft ? (

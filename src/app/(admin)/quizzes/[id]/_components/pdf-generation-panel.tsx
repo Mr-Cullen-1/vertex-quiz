@@ -185,10 +185,6 @@ export function PdfGenerationPanel({
             {clearError}
           </p>
         ) : null}
-        <p className="mt-4 text-sm text-muted-foreground">
-          Reviewing and editing individual questions arrives in a later
-          update — for now this quiz is ready with its generated draft.
-        </p>
       </div>
     );
   }

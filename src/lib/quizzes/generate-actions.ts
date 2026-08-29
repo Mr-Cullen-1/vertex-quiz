@@ -2,11 +2,11 @@
 
 import { createPartFromBase64 } from "@google/genai";
 import { createClient } from "@/lib/supabase/server";
-import type { SupabaseServerClient } from "@/lib/supabase/server";
 import { getGeminiClient, GEMINI_MODEL } from "@/lib/gemini/client";
 import { geminiExtractionSchema, geminiResponseJsonSchema } from "@/lib/gemini/schema";
 import { buildExtractionPrompt } from "@/lib/gemini/prompt";
 import { validateExtraction } from "@/lib/gemini/validate";
+import { loadOwnedDraftQuiz, requireSession } from "./ownership";
 import {
   QUIZ_PDF_BUCKET,
   quizPdfStoragePath,
@@ -21,48 +21,14 @@ export type ClearQuestionsResult = { success: true } | { success: false; error: 
 
 type OwnedDraftQuiz = {
   id: string;
+  status: string;
   multiple_choice_count: number;
   true_false_count: number;
   source_pdf_path: string | null;
 };
 
-/**
- * Loads a quiz the caller owns and that is still a draft. RLS
- * (`quizzes_select_own`) already means another teacher's quiz comes back
- * as no row at all, indistinguishable from a nonexistent id — this just
- * turns that into a clear message instead of a silent no-op.
- */
-async function loadOwnedDraftQuiz(
-  supabase: SupabaseServerClient,
-  quizId: string
-): Promise<{ quiz: OwnedDraftQuiz | null; error: string | null }> {
-  const { data: quiz, error } = await supabase
-    .from("quizzes")
-    .select("id, status, multiple_choice_count, true_false_count, source_pdf_path")
-    .eq("id", quizId)
-    .maybeSingle();
-
-  if (error) {
-    console.error("Failed to load quiz:", error.message);
-    return { quiz: null, error: "Failed to load the quiz." };
-  }
-  if (!quiz) {
-    return { quiz: null, error: "Quiz not found." };
-  }
-  if (quiz.status !== "draft") {
-    return { quiz: null, error: "This quiz is no longer a draft." };
-  }
-
-  return { quiz, error: null };
-}
-
-async function requireSession(supabase: SupabaseServerClient) {
-  const { data, error } = await supabase.auth.getClaims();
-  if (error || !data?.claims) {
-    return { sub: null, error: "Your session has expired. Please sign in again." };
-  }
-  return { sub: data.claims.sub, error: null };
-}
+const OWNED_DRAFT_QUIZ_SELECT =
+  "id, status, multiple_choice_count, true_false_count, source_pdf_path";
 
 /**
  * Uploads a PDF for a draft quiz to private Storage
@@ -80,7 +46,11 @@ export async function uploadQuizPdf(
   const { sub, error: authError } = await requireSession(supabase);
   if (!sub) return { success: false, error: authError! };
 
-  const { quiz, error: quizError } = await loadOwnedDraftQuiz(supabase, quizId);
+  const { quiz, error: quizError } = await loadOwnedDraftQuiz<OwnedDraftQuiz>(
+    supabase,
+    quizId,
+    OWNED_DRAFT_QUIZ_SELECT
+  );
   if (!quiz) return { success: false, error: quizError! };
 
   const file = formData.get("file");
@@ -134,7 +104,11 @@ export async function generateQuestions(quizId: string): Promise<GenerateQuestio
   const { sub, error: authError } = await requireSession(supabase);
   if (!sub) return { success: false, error: authError! };
 
-  const { quiz, error: quizError } = await loadOwnedDraftQuiz(supabase, quizId);
+  const { quiz, error: quizError } = await loadOwnedDraftQuiz<OwnedDraftQuiz>(
+    supabase,
+    quizId,
+    OWNED_DRAFT_QUIZ_SELECT
+  );
   if (!quiz) return { success: false, error: quizError! };
 
   if (!quiz.source_pdf_path) {
@@ -246,7 +220,11 @@ export async function clearGeneratedQuestions(quizId: string): Promise<ClearQues
   const { sub, error: authError } = await requireSession(supabase);
   if (!sub) return { success: false, error: authError! };
 
-  const { quiz, error: quizError } = await loadOwnedDraftQuiz(supabase, quizId);
+  const { quiz, error: quizError } = await loadOwnedDraftQuiz<OwnedDraftQuiz>(
+    supabase,
+    quizId,
+    OWNED_DRAFT_QUIZ_SELECT
+  );
   if (!quiz) return { success: false, error: quizError! };
 
   const { error } = await supabase.from("questions").delete().eq("quiz_id", quizId);

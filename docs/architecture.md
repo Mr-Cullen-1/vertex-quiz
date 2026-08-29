@@ -36,8 +36,10 @@ system of record besides Gemini.
   `/quizzes`, `/results`, `/settings`. Requires an authenticated Supabase
   session, enforced by `(admin)/layout.tsx`. Shell added in Phase 2;
   `/quizzes/new`, `/quizzes/[id]`, and `/quizzes/[id]/edit` (draft
-  creation/viewing/editing) added in Phase 3. AI extraction, the question
-  editor, and publishing still don't exist — see "Quiz lifecycle" below.
+  creation/viewing/editing) added in Phase 3; PDF upload + Gemini
+  generation added in Phase 4; `/quizzes/[id]/review` (question review,
+  edit, add, delete, reorder, approve) added in Phase 5. Publishing still
+  doesn't exist — see "Quiz lifecycle" below.
 - `app/(student)/join/[code]/...` — public student flow. No authentication;
   identity is a per-session token created on entry. Added in Phase 7.
 - `app/page.tsx` — minimal public landing/status page (Phase 0).
@@ -90,13 +92,23 @@ in the proxy alone cannot expose teacher data.
 
 ```
 draft (metadata only, Phase 3)
-  │  upload PDF → Gemini extraction → validate → save (Phase 4, this)
+  │  upload PDF → Gemini extraction → validate → save (Phase 4)
   ▼
-draft with generated questions
+draft with questions (pending review)
+  │  teacher approves/edits/adds/deletes/reorders questions (Phase 5, this)
+  ▼
+draft, all questions approved → "ready for publishing" (computed, not persisted)
   │
-  ├─(Phase 5)─> teacher reviews/edits questions        (still draft)
   └─(Phase 6)─> teacher publishes ──────────────────> published ──> closed
 ```
+
+"Ready for publishing" is intentionally **not** a `quizzes.status` value —
+it's computed on the review page from
+`count(questions.review_status = 'approved') = count(questions.*) > 0`.
+`quizzes.status` stays `'draft'` for the entire review process; nothing in
+Phase 5 writes `published` or touches the `status` check constraint. This
+keeps the non-negotiable product rule intact: only an explicit, future
+Phase 6 publish action can ever move a quiz out of draft.
 
 Phase 3 implements quiz metadata: a teacher creates a `quizzes` row with a
 title, optional description, a fixed `multiple_choice_count` /
@@ -123,12 +135,10 @@ instead of a generic Postgres error.
 Phase 4 fills in `questions`/`answers`: the teacher uploads a PDF, it's
 stored privately, sent to Gemini, and the validated result is saved as one
 atomic batch (see "PDF upload and AI question generation" below). The
-`/quizzes/[id]` detail page still doesn't show individual question
-content — the question *editor* (reading/editing each question and answer)
-is explicitly Phase 5 scope. Right now the detail page only shows: the
-requested structure (counts), whether a PDF is uploaded, and — once
-generation succeeds — a count summary ("10 questions generated") with the
-option to clear them and regenerate.
+`/quizzes/[id]` detail page shows the requested structure (counts), the PDF
+upload panel, and a "Question review" summary card linking to
+`/quizzes/[id]/review` — the full question editor built in Phase 5 (see
+"Question review and management" below).
 
 ## PDF upload and AI question generation
 
@@ -198,6 +208,76 @@ accurate message (the real requested MC/TF counts) rather than fabricated
 sub-phase timing that can't actually be observed from a single
 request/response Gemini call.
 
+## Question review and management (Phase 5)
+
+```
+Draft quiz with questions (from Phase 4 generation and/or manual add)
+  → src/lib/quizzes/question-actions.ts: addQuestion / updateQuestion /
+    deleteQuestion / reorderQuestions / setQuestionReviewStatus
+  → src/lib/quizzes/ownership.ts: requireSession + loadOwnedDraftQuiz
+    (friendly, fast-fail "is this my draft quiz?" check — never the real
+    security boundary)
+  → Postgres RPCs (add_quiz_question / update_quiz_question /
+    delete_quiz_question / reorder_quiz_questions), each re-deriving
+    ownership itself via is_quiz_owner()/is_question_owner() — the actual
+    boundary, independent of whatever quizId/questionId the client sent
+  → questions.review_status ('pending' | 'approved'), quizzes.
+    multiple_choice_count/true_false_count/total_questions kept in sync
+```
+
+**Review status.** `questions.review_status` (migration
+`20260830120000_add_question_management.sql`) is `'pending'` by default —
+true for both AI-generated and manually-added questions, and reset back to
+`'pending'` by `update_quiz_question` on every edit, since the previously-
+approved content no longer exists once changed. Approving/un-approving
+(`setQuestionReviewStatus`) is a single-row `questions` update — no RPC
+needed, since RLS's existing `questions_update_own` policy (already scoped
+through `is_quiz_owner`) is the real boundary there, same as any other
+question write.
+
+**Shared validation, not duplicated.** `src/lib/quizzes/question-rules.ts`
+(`validateQuestionShape`) is the one authority for MC/TF answer-shape rules
+— exact counts, exact correct-answer counts, non-empty text, no duplicate
+MC options, the fixed True/False vocabulary. Both the Gemini batch
+validator (`src/lib/gemini/validate.ts`, which additionally checks the
+requested totals across a whole batch) and the manual add/edit Server
+Actions call into it, so a teacher-typed question is held to exactly the
+same bar as an AI-generated one. This is a refactor of what was, until
+Phase 5, inline logic duplicated nowhere yet but shaped identically —
+extracting it here means Phase 5 didn't reinvent the Phase 4 rules.
+
+**Atomic multi-table writes, same pattern as Phase 4.** Add/update/delete
+all touch `questions`, `answers`, and `quizzes`' per-type counters
+together, so each is a single `security invoker` Postgres function (one
+implicit transaction) rather than several sequential client calls that
+could leave inconsistent state if one failed partway:
+
+- `add_quiz_question` — inserts the question + its answers at the next
+  `order_index`, then increments the matching `multiple_choice_count`/
+  `true_false_count` and `total_questions` on `quizzes` in the same
+  statement (so `quizzes_question_counts_match` is never transiently
+  violated).
+- `update_quiz_question` — replaces the answer set (delete + reinsert) and
+  the question row; if the type changed (MC ↔ TF) it also shifts the two
+  per-type counters by one each, in one statement.
+- `delete_quiz_question` — deletes the question (answers cascade),
+  resequences the quiz's remaining questions' `order_index` to stay
+  contiguous (0..n-1) using the same deferred-unique-constraint trick Phase
+  1 built for exactly this purpose, then decrements the matching counter.
+- `reorder_quiz_questions` — requires the caller to supply every question
+  id the quiz currently has (validated inside the function, not just the
+  client) and assigns a full new `order_index` set in one statement — no
+  sequence of individual updates that could transiently collide.
+
+All four are `security invoker` (run as the calling teacher, so the
+existing RLS insert/update/delete policies on `questions`/`answers` still
+apply) and explicitly `grant execute ... to authenticated` — new routines
+are never auto-granted on this project (see docs/database.md "Table
+privileges"), same lesson as Phase 2 and Phase 4.
+
+**"Ready for publishing" is computed, never persisted** — see "Quiz
+lifecycle" above.
+
 ## Data-loading errors
 
 A Supabase query error must never be allowed to quietly look like "no
@@ -241,8 +321,10 @@ Only `src/lib/quizzes/generate-actions.ts` calls into it — no Gemini call
 happens outside a Server Action.
 
 Nothing downstream of "draft questions persisted" trusts the AI output
-further — the teacher review screen (Phase 5) is the only path to
-`published` (Phase 6).
+further — the teacher review screen (`/quizzes/[id]/review`, Phase 5) is
+where every question (AI-generated or manually added) must be explicitly
+approved, and only a future Phase 6 publish action can move a quiz out of
+draft.
 
 ## Correctness and randomization
 
@@ -281,6 +363,8 @@ src/
         new/                  Phase 3 — create-quiz form
         [id]/                 Phase 3 — draft detail (view/edit/delete)
           edit/                 Phase 3 — edit-quiz form (pre-filled)
+          review/                 Phase 5 — question review/edit/add/delete/reorder
+            _components/            question-list/-card.tsx, question-editor-dialog.tsx, add-question-button.tsx
           _components/          delete-quiz-button.tsx, pdf-generation-panel.tsx (Phase 4)
         _components/          quiz-form.tsx — shared create/edit form
       results/              Empty-state shell, Phase 9/10 fill it in
@@ -299,6 +383,10 @@ src/
       actions.ts              Phase 3 — createQuiz/updateQuiz/deleteQuiz
       pdf.ts                   Phase 4 — bucket/size/magic-byte constants + validation
       generate-actions.ts       Phase 4 — uploadQuizPdf/generateQuestions/clearGeneratedQuestions
+      ownership.ts               Phase 5 — requireSession/loadOwnedDraftQuiz, shared by generate-actions.ts too
+      question-rules.ts           Phase 5 — validateQuestionShape, shared with gemini/validate.ts
+      question-schema.ts           Phase 5 — Zod shape for manual question input
+      question-actions.ts           Phase 5 — add/update/delete/reorder/setReviewStatus
     gemini/
       client.ts               Phase 4 — server-only GoogleGenAI client
       prompt.ts                Phase 4 — extraction prompt builder
@@ -312,7 +400,7 @@ src/
       assert-no-error.ts       Phase 2 — throw-on-Supabase-error helper
   proxy.ts                 Phase 1/2 — session refresh + optimistic redirects
 supabase/
-  migrations/              Phase 1–4 — SQL schema + RLS + grants + Storage + RPC, via Supabase CLI
+  migrations/              Phase 1–5 — SQL schema + RLS + grants + Storage + RPC, via Supabase CLI
 docs/                     Reference documentation (this directory)
 ```
 

@@ -88,16 +88,16 @@ project:
 - **Admin (teacher) app** — SaaS dashboard, Supabase-authenticated, lives
   under an `(admin)` route group. Shell (login/dashboard/results/settings)
   built in Phase 2; quiz draft creation/editing/deletion
-  (`/quizzes/new`, `/quizzes/[id]`, `/quizzes/[id]/edit`) added in Phase 3.
-  quiz draft creation/editing/deletion (`/quizzes/new`, `/quizzes/[id]`,
-  `/quizzes/[id]/edit`) and PDF upload + Gemini question generation
-  (`generateQuestions`, `uploadQuizPdf`) added in Phase 3/4. Server
-  Components read data; Server Actions mutate it; business rules
-  (ownership, publishing rules, correctness) are enforced server-side,
-  never trusted from the client. Quiz lifecycle: `draft (metadata)` →
-  `draft (with generated questions, Phase 4 — done)` → (Phase 5
-  review/edit) → (Phase 6 publish) → `published → closed` — question
-  content isn't reviewable/editable yet, and nothing past `draft` exists
+  (`/quizzes/new`, `/quizzes/[id]`, `/quizzes/[id]/edit`) added in Phase 3;
+  PDF upload + Gemini question generation (`generateQuestions`,
+  `uploadQuizPdf`) added in Phase 4; question review/edit/add/delete/
+  reorder (`/quizzes/[id]/review`) added in Phase 5. Server Components
+  read data; Server Actions mutate it; business rules (ownership,
+  publishing rules, correctness) are enforced server-side, never trusted
+  from the client. Quiz lifecycle: `draft (metadata)` → `draft (with
+  generated/manual questions)` → `draft (all questions approved →
+  "ready for publishing", computed not persisted — Phase 5, done)` →
+  (Phase 6 publish) → `published → closed` — nothing past `draft` exists
   yet; see [docs/architecture.md](./docs/architecture.md) → "Quiz
   lifecycle".
 - **Student app** — public, unauthenticated, lives under a `(student)` route
@@ -154,6 +154,19 @@ pattern as every teacher-scoped table), and one Postgres function,
 `create_quiz_questions()`, so a whole Gemini-generated batch commits or
 rolls back atomically. Details: [docs/database.md](./docs/database.md) →
 "Storage and RPC".
+
+**Phase 5 additions — one column, four functions:**
+`questions.review_status` (`pending`/`approved`, default `pending`), plus
+`add_quiz_question()`/`update_quiz_question()`/`delete_quiz_question()`/
+`reorder_quiz_questions()` for atomic multi-table question management —
+each keeps `quizzes.multiple_choice_count`/`true_false_count`/
+`total_questions` in sync with the real row count. No `quizzes.status`
+change: "ready for publishing" is computed from `review_status`, never
+persisted. Also discovered (documented, not fixed — a future-phase
+concern): `service_role` has no table grants on this project either, same
+gotcha as the one below but for the admin client. Details:
+[docs/database.md](./docs/database.md) → "Question management RPCs" and
+"Table privileges".
 
 Full verification logs (Phase 1–4):
 [docs/development-progress.md](./docs/development-progress.md).
@@ -250,19 +263,21 @@ confirmation to continue.
 | 2 | Teacher authentication and dashboard | ✅ Done — verified end-to-end with a real login |
 | 3 | Create Quiz and PDF upload | ✅ Done — PDF upload landed as part of Phase 4 |
 | 4 | Gemini AI extraction | ✅ Done — verified end-to-end with a real PDF and a real Gemini call |
-| 5 | Question review and editor | ⏳ Next |
-| 6 | Quiz settings and publishing | Not started |
+| 5 | Question review and editor | ✅ Done — approve/edit/add/delete/reorder, verified end-to-end |
+| 6 | Quiz settings and publishing | ⏳ Next |
 | 7 | Student entry and session | Not started |
 | 8 | Student quiz experience | Not started |
 | 9 | Results | Not started |
 | 10 | Analytics | Not started |
 | 11 | Final MVP polish | Not started |
 
-**Current phase:** 4 (Gemini AI extraction) — complete. A teacher can
-create a draft quiz, upload its source PDF, and generate its full set of
-Multiple Choice/True-False questions and answers via Gemini — verified
-with a real PDF, a real Gemini call, and a real cross-tenant Storage
-security test. Question *content* isn't reviewable/editable yet (Phase 5).
-**Next phase:** 5 — Question review and editor.
+**Current phase:** 5 (Question review and editor) — complete. A teacher
+can review every question on a draft quiz — AI-generated or manually
+added — approve/edit/delete/reorder it, and see "ready for publishing"
+once every question is approved (a computed state, not a persisted one).
+Nothing publishes automatically; the quiz stays `draft` throughout.
+Verified with a real Gemini-generated batch, real manual add/edit/delete/
+reorder through the browser, and a real cross-tenant RPC/RLS security
+test. **Next phase:** 6 — Quiz settings and publishing.
 
 Live status detail: [docs/development-progress.md](./docs/development-progress.md).

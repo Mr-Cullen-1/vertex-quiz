@@ -6,8 +6,12 @@
 writes real rows into the existing `quizzes` table under the existing RLS.
 Phase 4 (PDF + Gemini) added Storage configuration and one new Postgres
 function — no `quizzes`/`questions`/`answers` table/column changes; the
-`source_pdf_path` column it uses already existed from Phase 1. SQL
-migrations live under `supabase/migrations/`:
+`source_pdf_path` column it uses already existed from Phase 1. Phase 5
+(question review) added one column (`questions.review_status`) and four
+new Postgres functions for atomic question add/edit/delete/reorder — no
+new tables, and `quizzes.status`'s check constraint is untouched ("ready
+for publishing" is computed, never persisted — see architecture.md).
+SQL migrations live under `supabase/migrations/`:
 
 - `20260829120000_create_core_schema.sql` — tables, indexes, constraints,
   triggers.
@@ -19,16 +23,19 @@ migrations live under `supabase/migrations/`:
 - `20260829120400_create_quiz_questions_rpc.sql` — `create_quiz_questions()`,
   the atomic question-batch insert Gemini generation writes through
   (Phase 4).
+- `20260830120000_add_question_management.sql` — `questions.review_status`
+  column, plus `add_quiz_question()`/`update_quiz_question()`/
+  `delete_quiz_question()`/`reorder_quiz_questions()` (Phase 5).
 
-`npx supabase migration list` confirms all five are recorded as applied on
+`npx supabase migration list` confirms all six are recorded as applied on
 the remote (local and remote timestamps match). Everything below was
 independently re-verified by querying the live database directly
 (`supabase db query --linked`) — not just re-reading the migration files —
 including a functional test of the deferred answer-count trigger (insert
 invalid/valid answer sets inside a transaction, then roll back), a real
-teacher login against the deployed app, and (Phase 4) a real PDF uploaded
-and processed through the actual running application. See
-[development-progress.md](./development-progress.md) Phase 1–4 for the
+teacher login against the deployed app, and (Phase 4/5) real PDFs/questions
+uploaded and processed through the actual running application. See
+[development-progress.md](./development-progress.md) Phase 1–5 for the
 full verification logs and exact results.
 
 ## Table privileges — a Phase 1 gap fixed in Phase 2
@@ -57,6 +64,40 @@ exactly the operations its existing RLS policies already allow — no more:
 Supabase directly from the browser, so there is nothing for `anon` to need.
 RLS itself, its 17 policies, and every ownership rule are unchanged by this
 migration; it only unblocks the access those policies already described.
+
+### `service_role` has the same gap — discovered in Phase 5, not yet fixed
+
+While writing Phase 5's test/verification scripts, a direct
+`admin.from("questions").select(...)` call (using the `SUPABASE_SECRET_KEY`
+client) failed with `permission denied for table questions`, with
+PostgREST's own hint suggesting `GRANT SELECT ON public.questions TO
+service_role`. Verified directly: `service_role` has `rolbypassrls = true`
+(so RLS itself is correctly bypassed) but **zero rows** in
+`information_schema.role_table_grants` for the `public` schema — this
+project's "no auto-grant" behavior (see above) apparently applies to
+`service_role` too, not just `anon`/`authenticated`.
+
+This has never surfaced as a bug because no phase through Phase 4 ever
+calls `.from()` on a `public.*` table with the admin client — Phase 1–4's
+admin-client usage is entirely `auth.admin.*` (user management) and
+`storage.*` (bucket objects), neither of which is gated by these table
+grants. Phase 5's test scripts hit it purely as a verification convenience
+and were rewritten to use the real authenticated teacher client instead
+(which already has the grants it needs).
+
+**This is a real latent gap for a future phase**, though: Phase 1's RLS
+design (see the comment atop `20260829120100_enable_rls.sql`) already
+commits to the service-role admin client (`src/lib/supabase/admin.ts`)
+being how all student-facing writes to `participants`/`quiz_sessions`/
+`responses` happen (Phase 7+, not built yet) — and today, `service_role`
+has no grant to write to any of them either. Whoever builds that phase will
+need a `grant ... to service_role` migration for exactly those three
+tables (and nothing more — `service_role` should still not need
+`quizzes`/`questions`/`answers` writes for anything currently planned).
+Documented here rather than fixed now, since Phase 5 itself never needed
+it and a schema/grant change outside the current phase's actual
+requirement is exactly what "don't touch unless absolutely required for
+this phase" is meant to prevent.
 
 ## Principles
 
@@ -134,12 +175,14 @@ Indexes: `quizzes (teacher_id)`, `quizzes (status)`.
 | type           | text    | `multiple_choice` \| `true_false`          |
 | question_text  | text    | not null, non-empty                        |
 | order_index    | int     | position within the quiz                    |
+| review_status  | text    | `pending` \| `approved`, default `pending` (Phase 5) |
 | created_at / updated_at | timestamptz | `updated_at` maintained by trigger |
 
 Constraint: `unique (quiz_id, order_index) deferrable initially deferred`.
-Index: `questions (quiz_id)`. Changing a question's `type` after it has
-answers is not supported at the application layer (avoids needing a second
-DB-level invariant check for a rare edit).
+Index: `questions (quiz_id)`. As of Phase 5, changing a question's `type`
+(MC ↔ TF) **is** supported — `update_quiz_question()` replaces the whole
+answer set and adjusts `quizzes.multiple_choice_count`/`true_false_count`
+atomically in the same statement; see "Question management RPCs" below.
 
 ### `answers`
 
@@ -282,6 +325,46 @@ Explicitly granted `EXECUTE` to `authenticated` in the same migration
 (functions get `EXECUTE` granted to `PUBLIC` by default in Postgres,
 unlike tables — confirmed this still held here rather than assuming it,
 same discipline as the Phase 2 table-grants lesson).
+
+## Question management RPCs (Phase 5)
+
+All four are `security invoker`, `set search_path = ''`, and explicitly
+`grant execute ... to authenticated` (same discipline as
+`create_quiz_questions` above). Each re-derives ownership itself via
+`is_quiz_owner()`/`is_question_owner()` and refuses if the quiz isn't a
+draft — this is the real security boundary, independent of whatever
+`quizId`/`questionId` a client sends.
+
+- **`add_quiz_question(p_quiz_id uuid, p_question jsonb) returns
+  questions`** — inserts the question + answers at the next `order_index`,
+  then adjusts `quizzes.multiple_choice_count`/`true_false_count`/
+  `total_questions` in the same statement. New questions always start
+  `review_status = 'pending'`.
+- **`update_quiz_question(p_question_id uuid, p_question jsonb) returns
+  questions`** — replaces the answer set (delete + reinsert) and the
+  question row, resets `review_status` to `'pending'` (the previously-
+  approved content no longer exists), and — only if the type changed —
+  shifts `multiple_choice_count`/`true_false_count` by one each, all in
+  one statement.
+- **`delete_quiz_question(p_question_id uuid) returns void`** — deletes
+  the question (answers cascade via the existing FK), resequences the
+  quiz's remaining questions' `order_index` to stay contiguous using a
+  single `UPDATE ... FROM (SELECT ... row_number() ...)`, then decrements
+  the matching counter. The resequencing update relies on `questions`'
+  `unique (quiz_id, order_index) deferrable initially deferred` constraint
+  from Phase 1 tolerating the transient duplicate order values it produces
+  mid-statement.
+- **`reorder_quiz_questions(p_quiz_id uuid, p_question_ids uuid[]) returns
+  setof questions`** — validates the array is exactly the quiz's current
+  question ids (right count, no duplicates, no foreign ids) before
+  assigning a full new `order_index` set in one `UPDATE ... FROM
+  unnest(...) WITH ORDINALITY` statement — never a sequence of per-row
+  updates that could transiently violate the same deferred unique
+  constraint outside the statement's own transaction.
+
+None of the four touch `quizzes.status` or its check constraint —
+"ready for publishing" is computed application-side from
+`questions.review_status`, never written back to `quizzes`.
 
 ## Migrations
 
@@ -483,3 +566,89 @@ directly, except where noted).
   the users) via the Admin API. Confirmed afterward: `auth.users` and
   `quizzes` contain only the one pre-existing real account and its own
   quiz, untouched throughout; the `quiz-pdfs` bucket is empty.
+
+## Live verification — Phase 5 question review (2026-08-30)
+
+Migration `20260830120000_add_question_management.sql` applied via
+`npx supabase db push` and independently re-verified against the live
+database: `questions.review_status` exists (`text`, `not null`, default
+`'pending'::text`); all four new functions (`add_quiz_question`,
+`update_quiz_question`, `delete_quiz_question`, `reorder_quiz_questions`)
+show `security_type = 'INVOKER'` in `information_schema.routines` and have
+`EXECUTE` granted to `authenticated` in `information_schema.
+routine_privileges`. RLS remained enabled on all 7 tables and all 17
+pre-existing policies were unchanged (row counts confirmed before and
+after this phase).
+
+Full flow tested through the real, built application (a fresh Turbopack
+dev server — an earlier long-lived one from an old session predated these
+files and gave stale/inconsistent results until restarted, a reminder that
+new routes/Server Action files sometimes need a hard dev-server restart,
+not just HMR) using two temporary teacher accounts and a real Gemini call:
+
+- **Real generation → review → approve**: created a 2 MC + 1 TF draft,
+  uploaded a real PDF, generated questions through the actual Gemini
+  pipeline (retried automatically past one transient `503 UNAVAILABLE`
+  "model overloaded" response — not a code issue), landed on
+  `/quizzes/[id]/review` showing "0 / 3 reviewed". Approving a question
+  updated the header to "1 / 3 reviewed" live.
+- **Edit resets approval**: approved a second question, then edited its
+  text and correct answer through the real dialog/Server Action — the
+  question reverted to "pending" (progress dropped back to "1 / 3") and
+  both the new text and new correct answer persisted through a full page
+  reload.
+- **Delete**: deleted the third question; count dropped to 2 with no
+  gaps in `order_index` (resequenced by `delete_quiz_question`).
+- **Manual add, both types**: added a Multiple Choice question (4 typed
+  options, one marked correct) and a True/False question (fixed True/False
+  options) through the real "Add question" dialog; both appeared as
+  `pending` and both fed through the exact same `validateQuestionShape`
+  rules a Gemini-generated question does.
+- **Invalid input rejected server-side, through the real UI**: submitting
+  an MC question with two identical option texts (case-insensitive) was
+  rejected with `"...has duplicate answer options."`; submitting one with
+  an empty option was rejected with `"...has an empty answer option."`.
+  Neither attempt created a row (question count didn't change).
+- **Invalid-shape unit coverage on the real module**: `validateQuestionShape`
+  (the actual production function, imported and run directly with Node's
+  native TypeScript support — not reimplemented/mocked) was exercised with
+  11 cases: valid MC, valid TF, wrong MC answer count, 0 and 2 correct
+  answers, duplicate MC options, empty option, wrong TF answer count, 0
+  correct TF answers, non-"True"/"False" TF vocabulary, and empty question
+  text — all 11 produced the expected accept/reject result.
+- **Reorder**: moved the first question down one position through the
+  real move-down button; the new order persisted through a full page
+  reload.
+- **Ready for publishing, without publishing**: approved every remaining
+  question; the "Ready for publishing" banner appeared once (and only
+  once) `reviewed count === question count`. Reloaded the quiz detail page
+  immediately after — `status` was still `draft`, confirming Phase 5 never
+  writes `published` anywhere.
+- **Cross-tenant isolation — RPCs and RLS, not just pages**: with Teacher
+  B authenticated as a real second account, direct calls (not through any
+  UI) to `add_quiz_question`, `update_quiz_question`,
+  `delete_quiz_question`, and `reorder_quiz_questions` against Teacher A's
+  quiz/question ids all failed with `"...not found or you do not have
+  access to it."`; a direct `questions` table `UPDATE` attempting to
+  self-approve Teacher A's question matched zero rows (RLS, not the RPC
+  layer, blocking it); a direct `SELECT` of Teacher A's questions returned
+  zero rows. Re-read Teacher A's data afterward: same row count, same
+  text, no `"Hijacked by Teacher B"` string anywhere.
+- **Unauthenticated access**: a browser context with no session hitting
+  `/quizzes/[id]/review` directly was redirected to `/login` (same
+  `(admin)/layout.tsx` gate as every other admin route).
+- **Answer integrity**: every question in the test quiz had exactly the
+  right answer count (4 for MC, 2 for TF) and exactly 1 correct answer
+  after every add/edit/delete in the run — no orphaned or malformed answer
+  rows (orphaning is additionally structurally impossible via `answers.
+  question_id`'s `ON DELETE CASCADE`, verified live back in Phase 1).
+- **`service_role` table-grant gap discovered and documented, not
+  fixed** — see "Table privileges" above. Test scripts were rewritten to
+  use the real authenticated teacher client instead once this surfaced.
+- **Cleanup**: both temporary teacher accounts and their Storage objects
+  (the generated test PDF's uploads) were removed via the Admin API —
+  deleting Teacher A required first deleting her `quizzes` rows directly
+  (same transient `deleteUser()` cascade-depth issue seen in Phase 4,
+  resolved the same way). Confirmed afterward: `auth.users` and `quizzes`
+  contain only the one pre-existing real account and its own quiz; the
+  `quiz-pdfs` bucket is empty for both temporary teacher ids.

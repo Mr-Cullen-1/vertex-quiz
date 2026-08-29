@@ -1,28 +1,22 @@
 import type { GeminiExtraction } from "./schema";
+import { validateQuestionShape, type QuestionShapeInput } from "@/lib/quizzes/question-rules";
 
-export type ValidatedAnswer = {
-  text: string;
-  is_correct: boolean;
-};
-
-export type ValidatedQuestion = {
-  type: "multiple_choice" | "true_false";
-  question_text: string;
-  answers: ValidatedAnswer[];
-};
+export type ValidatedAnswer = QuestionShapeInput["answers"][number];
+export type ValidatedQuestion = QuestionShapeInput;
 
 export type ValidationResult =
   | { success: true; questions: ValidatedQuestion[] }
   | { success: false; error: string };
 
 /**
- * The authoritative correctness check on Gemini's output. `schema.ts`
- * only confirms the JSON has the right *shape* (zod parses it); this
- * enforces the actual business rules the product spec requires — exact
- * counts, exact answer counts, exact correct-answer counts, and the fixed
- * True/False vocabulary. Never trust the AI response past this point:
- * any failure here rejects the entire batch, nothing partial is ever
- * passed on to be saved.
+ * The authoritative correctness check on Gemini's output. `schema.ts` only
+ * confirms the JSON has the right *shape* (zod parses it); this enforces
+ * the actual business rules the product spec requires — exact totals
+ * across the whole batch, then (via `validateQuestionShape`, shared with
+ * the manual question actions) exact per-question answer counts, exact
+ * correct-answer counts, and the fixed True/False vocabulary. Never trust
+ * the AI response past this point: any failure here rejects the entire
+ * batch, nothing partial is ever passed on to be saved.
  */
 export function validateExtraction(
   extraction: GeminiExtraction,
@@ -57,66 +51,14 @@ export function validateExtraction(
   const validated: ValidatedQuestion[] = [];
 
   for (const [index, q] of questions.entries()) {
-    const position = index + 1;
-    const questionText = q.question.trim();
-    if (!questionText) {
-      return { success: false, error: `Question ${position} has empty text.` };
+    const result = validateQuestionShape(
+      { type: q.type, question_text: q.question, answers: q.answers },
+      `Question ${index + 1}`
+    );
+    if (!result.success) {
+      return result;
     }
-
-    const answers = q.answers.map((a) => ({
-      text: a.text.trim(),
-      is_correct: a.is_correct,
-    }));
-
-    if (answers.some((a) => !a.text)) {
-      return { success: false, error: `Question ${position} has an empty answer option.` };
-    }
-
-    const correctCount = answers.filter((a) => a.is_correct).length;
-
-    if (q.type === "multiple_choice") {
-      if (answers.length !== 4) {
-        return {
-          success: false,
-          error: `Question ${position} (Multiple Choice) has ${answers.length} answers instead of exactly 4.`,
-        };
-      }
-      if (correctCount !== 1) {
-        return {
-          success: false,
-          error: `Question ${position} (Multiple Choice) has ${correctCount} correct answers instead of exactly 1.`,
-        };
-      }
-      const normalized = answers.map((a) => a.text.toLowerCase());
-      if (new Set(normalized).size !== normalized.length) {
-        return {
-          success: false,
-          error: `Question ${position} (Multiple Choice) has duplicate answer options.`,
-        };
-      }
-    } else {
-      if (answers.length !== 2) {
-        return {
-          success: false,
-          error: `Question ${position} (True/False) has ${answers.length} answers instead of exactly 2.`,
-        };
-      }
-      if (correctCount !== 1) {
-        return {
-          success: false,
-          error: `Question ${position} (True/False) has ${correctCount} correct answers instead of exactly 1.`,
-        };
-      }
-      const labels = new Set(answers.map((a) => a.text.toLowerCase()));
-      if (!(labels.size === 2 && labels.has("true") && labels.has("false"))) {
-        return {
-          success: false,
-          error: `Question ${position} (True/False) must have exactly "True" and "False" as its two answers.`,
-        };
-      }
-    }
-
-    validated.push({ type: q.type, question_text: questionText, answers });
+    validated.push(result.question);
   }
 
   return { success: true, questions: validated };

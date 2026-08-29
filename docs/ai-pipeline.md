@@ -74,12 +74,15 @@ Checked in order, on the whole batch:
 
 - Total question count matches `multiple_choice_count + true_false_count`
   exactly; MC count and TF count each match exactly.
-- Every `multiple_choice` question has exactly 4 answers with exactly 1
-  `is_correct`, and no duplicate answer text (case-insensitive).
-- Every `true_false` question has exactly 2 answers with exactly 1
-  `is_correct`, and the two answer texts are literally "True" and "False"
-  (case-insensitive) — not paraphrased alternatives.
-- Question text and every answer text are non-empty after trimming.
+- Per question (delegated to `validateQuestionShape` in
+  `src/lib/quizzes/question-rules.ts`, shared with the Phase 5 manual
+  add/edit question actions so an AI-generated and a teacher-typed
+  question are held to the identical bar): exactly 4 answers with exactly
+  1 `is_correct` for `multiple_choice` and no duplicate answer text
+  (case-insensitive); exactly 2 answers with exactly 1 `is_correct` for
+  `true_false`, with the two answer texts literally "True" and "False"
+  (case-insensitive) — not paraphrased alternatives; question text and
+  every answer text non-empty after trimming.
 
 **Any single failure rejects the entire batch** — nothing partial is ever
 written. This is stricter than an earlier sketch of this document, which
@@ -108,16 +111,20 @@ requested.") and can retry generation from the same PDF.
   draft questions before generating again." (also enforced a second time,
   independently, inside `create_quiz_questions` itself).
 
-## Regeneration
+## Regeneration and manual editing (Phase 5)
 
-Per-question/per-answer "regenerate" (Phase 5, not built yet) would call
-the same server-side Gemini service with a narrower prompt scoped to one
-question/answer, run through the same Zod + domain validation before
-replacing the existing draft row. A regenerate should never touch
-`quizzes.status` — the quiz stays in draft/review regardless. What Phase 4
-*does* implement today is whole-quiz regeneration: clear all generated
-questions (`clearGeneratedQuestions`), then generate again from the same
-(or a newly-uploaded) PDF.
+Phase 5 did not add a Gemini "regenerate this one question" call — that
+remains a possible future enhancement, not built. What it did add is a
+full manual editor on top of the same draft questions: a teacher can edit,
+delete, reorder, or add questions by hand on `/quizzes/[id]/review`, all
+validated by the exact same `validateQuestionShape` rules as this pipeline
+(see `src/lib/quizzes/question-actions.ts` and
+[architecture.md](./architecture.md) → "Question review and management").
+None of that touches `quizzes.status` — the quiz stays in draft through the
+whole review process, and only a future Phase 6 publish action can change
+that. Whole-quiz regeneration (clear all generated questions via
+`clearGeneratedQuestions`, then generate again from the same or a
+newly-uploaded PDF) is unchanged from Phase 4.
 
 ## Security
 

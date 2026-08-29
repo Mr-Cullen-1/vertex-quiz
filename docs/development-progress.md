@@ -771,3 +771,142 @@ to stop and ask.
 
 **Manual Supabase configuration required:** none. The Storage bucket and
 its policies were created via migration, not the Dashboard.
+
+## Phase 5 — Teacher question review ✅
+
+**Date:** 2026-08-30
+
+**What was built:**
+
+- **Migration**: `supabase/migrations/20260830120000_add_question_management.sql`
+  — one new column (`questions.review_status`, `pending`/`approved`,
+  default `pending`) and four `security invoker` Postgres functions
+  (`add_quiz_question`, `update_quiz_question`, `delete_quiz_question`,
+  `reorder_quiz_questions`), each re-deriving ownership itself and
+  explicitly granted `EXECUTE ... TO authenticated` (same discipline as
+  Phase 2/4). No new table, no `quizzes.status` change — "ready for
+  publishing" is computed from `review_status`, never persisted.
+- **Shared validation refactor**: extracted `validateQuestionShape` into
+  `src/lib/quizzes/question-rules.ts` and had `src/lib/gemini/validate.ts`
+  call into it, so the exact same MC/TF shape rules (counts,
+  correct-answer counts, no duplicate MC options, fixed True/False
+  vocabulary) apply to both AI-generated and manually-typed questions —
+  one authority, not two copies.
+- **Shared ownership helpers**: extracted `requireSession`/
+  `loadOwnedDraftQuiz` into `src/lib/quizzes/ownership.ts` (generic over
+  the caller's `select` string and expected row type) and had
+  `generate-actions.ts` use it too, removing what had been duplicated
+  Phase 4 logic.
+- **Server Actions**: `src/lib/quizzes/question-actions.ts` —
+  `addQuestion`, `updateQuestion`, `deleteQuestion`, `reorderQuestions`
+  (all validate via `question-rules.ts` then call the matching RPC),
+  `setQuestionReviewStatus` (a plain RLS-scoped update — no RPC needed for
+  a single-row single-table change).
+- **Review page**: `/quizzes/[id]/review` — header (question count,
+  "X / N reviewed", a "Ready for publishing" banner once every question is
+  approved), a card per question (type badge, review-status badge, answer
+  options with the correct one visually marked, move up/down, edit,
+  delete, approve/mark-pending), an "Add question" dialog (type select,
+  question text, 4 free-text MC options or fixed True/False, radio for the
+  correct answer). Reused the existing `AlertDialog` delete-confirm pattern
+  from Phase 3/4 and added three new shadcn/base-ui components (`dialog`,
+  `radio-group`, `select`) matching the existing design tokens — no new
+  design system, same navy/light/indigo-accent look.
+- **Quiz detail page**: added a small "Question review" card (question
+  count + review progress, link to the review page) so manual-only quizzes
+  (no PDF ever uploaded) can also reach question management — Phase 5
+  doesn't require generation first.
+
+**No schema change beyond the one column** — verified before writing any
+migration that a persisted "ready for publishing" quiz status wasn't
+necessary (it's computed), keeping the change to exactly what the review
+workflow needs.
+
+**Real end-to-end verification performed (not just code review):**
+
+- **Real generation → full review workflow, via a real headless browser**
+  (Playwright, installed temporarily like Phase 4, never added to
+  `package.json`): created a 2 MC + 1 TF draft, uploaded a real PDF,
+  generated through the real Gemini pipeline (one attempt hit a transient
+  `503 UNAVAILABLE` "model overloaded" response — retried automatically
+  and succeeded; not a code issue). Landed on the review page, approved a
+  question and watched "0 / 3" become "1 / 3" live, approved a second then
+  edited its text and correct answer through the real dialog — confirmed
+  it reverted to "pending" and both the new text and new correct answer
+  persisted through a full page reload. Deleted the third question
+  (count → 2, no order gaps). Added a manual MC question (4 typed options)
+  and a manual TF question (fixed True/False) through the real "Add
+  question" dialog. Approved everything remaining and confirmed the "Ready
+  for publishing" banner appeared — then reloaded the quiz detail page and
+  confirmed `status` was still `draft`. Moved the first question down one
+  position and confirmed the new order survived a reload.
+- **Invalid input rejected server-side, through the real UI**: an MC
+  submission with two identical option texts was rejected
+  (`"...has duplicate answer options."`); one with an empty option was
+  rejected (`"...has an empty answer option."`); neither created a row.
+- **`validateQuestionShape` exercised directly** — the real production
+  module, imported and run with Node's native TypeScript support (no
+  mocking/reimplementation): 11 cases (valid MC, valid TF, wrong MC
+  answer/correct counts, duplicate MC options, empty option, wrong TF
+  answer/correct counts, non-"True"/"False" TF text, empty question text)
+  — all 11 produced the expected result.
+- **Cross-tenant isolation — RPCs and RLS directly, not just pages**: a
+  second real teacher account attempted `add_quiz_question`,
+  `update_quiz_question`, `delete_quiz_question`, and
+  `reorder_quiz_questions` against the first teacher's quiz/question ids
+  (all rejected with "not found or you do not have access to it"), a
+  direct `questions` table update trying to self-approve the first
+  teacher's question (RLS matched zero rows), and a direct `SELECT` of the
+  first teacher's questions (zero rows). Re-read the first teacher's data
+  afterward: unchanged. Also confirmed a real unauthenticated browser
+  context gets redirected to `/login` on the review URL, and Teacher B
+  gets a real `404` opening Teacher A's review page directly.
+- **Answer integrity**: every question in the test quiz had exactly the
+  right answer/correct-answer count for its type after every mutation —
+  orphaning is additionally structurally impossible via `answers.
+  question_id`'s `ON DELETE CASCADE` (verified live back in Phase 1).
+- **Discovered and documented (not fixed)**: `service_role` has no table
+  grants on this project either — same "RLS needs an explicit GRANT"
+  finding as Phase 2, just never exercised before since no phase through
+  Phase 4 ever called `.from()` on a `public.*` table with the admin
+  client. This will matter for a future phase (student-facing writes via
+  the admin client) — see docs/database.md "Table privileges" for the
+  full writeup. Test scripts were rewritten to use the real authenticated
+  teacher client instead, which needed no such grant.
+- **No secret leakage**: re-checked a fresh production build's
+  `.next/static` for both `SUPABASE_SECRET_KEY` and `GEMINI_API_KEY` —
+  zero matches.
+- **Cleanup**: deleted both temporary teacher accounts and their Storage
+  objects via the Admin API (deleting the teacher with quiz data required
+  first deleting her `quizzes` rows directly, same transient
+  `deleteUser()` cascade-depth issue as Phase 4). Confirmed the database
+  and bucket afterward contain only the one pre-existing real teacher
+  account and quiz. All temporary scripts, the temporary test PDF, and the
+  temporary `pdfkit`/`playwright` dev tools were removed — neither was
+  added to `package.json`.
+
+**Validation:**
+
+- `npx tsc --noEmit` — no errors.
+- `npm run lint` — clean.
+- `npm run build` — succeeds; `/quizzes/[id]/review` appears in the route
+  list.
+- `npm run lint:sql` — all 6 migrations (including the new one) parse as
+  valid Postgres SQL.
+
+**Manually verify:**
+
+- Open a draft quiz with generated questions, approve/edit/delete/reorder
+  a few, and confirm the "X / N reviewed" header and "Ready for
+  publishing" banner behave as expected.
+- Add a question manually (both Multiple Choice and True/False) on a quiz
+  that has never had a PDF uploaded — confirm it's reachable without
+  generation.
+- Try submitting a Multiple Choice question with duplicate options or an
+  empty option — confirm a specific, non-generic error and that the
+  dialog doesn't silently save anything.
+- Confirm the quiz never leaves `draft` no matter how much of the review
+  workflow is completed — there's no publish button yet by design.
+
+**Manual Supabase configuration required:** none. The column and RPCs
+were created via migration, not the Dashboard.
