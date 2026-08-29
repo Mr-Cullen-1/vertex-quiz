@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -42,6 +43,8 @@ export function QuestionCard({
   isFirst,
   isLast,
   reorderPending,
+  selected,
+  onToggleSelected,
   onMoveUp,
   onMoveDown,
 }: {
@@ -51,6 +54,8 @@ export function QuestionCard({
   isFirst: boolean;
   isLast: boolean;
   reorderPending: boolean;
+  selected: boolean;
+  onToggleSelected: () => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
 }) {
@@ -100,6 +105,13 @@ export function QuestionCard({
     <div className="rounded-xl bg-card p-5 ring-1 ring-foreground/10">
       <div className="flex items-start justify-between gap-4">
         <div className="flex items-start gap-3">
+          <Checkbox
+            className="mt-1"
+            checked={selected}
+            onCheckedChange={onToggleSelected}
+            aria-label={`Select question ${position}`}
+          />
+
           <div className="flex flex-col items-center pt-0.5">
             <Button
               type="button"

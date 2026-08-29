@@ -225,3 +225,96 @@ export async function setQuestionReviewStatus(
 
   return { success: true };
 }
+
+export type BulkApproveResult =
+  | { success: true; approvedCount: number }
+  | { success: false; error: string };
+
+/**
+ * Approves either a specific set of questions (`questionIds`) or every
+ * question on the quiz (`questionIds === null`, used by "Approve all").
+ * Re-validates each target through the same `validateQuestionShape`
+ * authority every other write path uses before flipping any status, and
+ * rejects the whole batch on the first invalid question — never a partial
+ * approval. The actual write is a single `UPDATE ... WHERE quiz_id = ...
+ * AND id IN (...)` statement, which Postgres already applies atomically
+ * (all matching rows or none), so no RPC is needed. `quiz_id` is always
+ * taken from the server-verified owned quiz, never trusted from the
+ * client's `questionIds` alone — a foreign id (even one the same teacher
+ * owns on a different quiz) simply won't match and won't be touched.
+ */
+async function approveQuestionIds(
+  quizId: string,
+  questionIds: string[] | null
+): Promise<BulkApproveResult> {
+  const supabase = await createClient();
+
+  const { sub, error: authError } = await requireSession(supabase);
+  if (!sub) return { success: false, error: authError! };
+
+  const { quiz, error: quizError } = await loadOwnedDraftQuiz<OwnedDraftQuizStatus>(
+    supabase,
+    quizId,
+    "id, status"
+  );
+  if (!quiz) return { success: false, error: quizError! };
+
+  let targetsQuery = supabase
+    .from("questions")
+    .select("id, type, question_text, answers(answer_text, is_correct)")
+    .eq("quiz_id", quizId);
+  if (questionIds) {
+    targetsQuery = targetsQuery.in("id", questionIds);
+  }
+
+  const { data: targets, error: fetchError } = await targetsQuery;
+  if (fetchError) {
+    console.error("Failed to load questions for bulk approval:", fetchError.message);
+    return { success: false, error: "Failed to load the questions to approve." };
+  }
+  if (!targets || targets.length === 0) {
+    return { success: false, error: "No questions to approve." };
+  }
+
+  for (const question of targets) {
+    const shape = {
+      type: question.type,
+      question_text: question.question_text,
+      answers: question.answers.map((a) => ({ text: a.answer_text, is_correct: a.is_correct })),
+    };
+    const result = validateQuestionShape(shape, `"${question.question_text}"`);
+    if (!result.success) {
+      return { success: false, error: `Can't approve ${result.error}` };
+    }
+  }
+
+  const targetIds = targets.map((q) => q.id);
+  const { error: updateError } = await supabase
+    .from("questions")
+    .update({ review_status: "approved" })
+    .eq("quiz_id", quizId)
+    .in("id", targetIds);
+
+  if (updateError) {
+    console.error("Failed to bulk-approve questions:", updateError.message);
+    return { success: false, error: "Failed to approve the questions. Please try again." };
+  }
+
+  return { success: true, approvedCount: targetIds.length };
+}
+
+/** Approves exactly the given questions — used by the review page's "Approve selected". */
+export async function approveSelectedQuestions(
+  quizId: string,
+  questionIds: string[]
+): Promise<BulkApproveResult> {
+  if (questionIds.length === 0) {
+    return { success: false, error: "No questions selected." };
+  }
+  return approveQuestionIds(quizId, questionIds);
+}
+
+/** Approves every question on the quiz — used by the review page's "Approve all". */
+export async function approveAllQuestions(quizId: string): Promise<BulkApproveResult> {
+  return approveQuestionIds(quizId, null);
+}

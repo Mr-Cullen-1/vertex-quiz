@@ -910,3 +910,78 @@ workflow needs.
 
 **Manual Supabase configuration required:** none. The column and RPCs
 were created via migration, not the Dashboard.
+
+## Phase 5 enhancement — bulk question approval ✅
+
+**Date:** 2026-08-29
+
+Small UX addition on top of the already-verified Phase 5 review page:
+per-question checkboxes, a "Select all" checkbox (with standard
+indeterminate state when partially selected), "Approve selected", and
+"Approve all", all in `src/app/(admin)/quizzes/[id]/review/_components/
+question-list.tsx` (added `Checkbox` from shadcn, matching the existing
+design). No individual-approve button was duplicated — the existing
+per-card Approve/Mark-as-pending button is untouched.
+
+**No migration.** `src/lib/quizzes/question-actions.ts` gained
+`approveSelectedQuestions`/`approveAllQuestions`, both backed by one shared
+`approveQuestionIds(quizId, questionIds | null)` helper: fetch the target
+questions (scoped to the server-verified owned `quizId`, ignoring any
+foreign id a client might send), validate each through the existing
+`validateQuestionShape` (same authority Gemini-generated and manually
+added questions already go through — never a looser bar for bulk), then a
+single `UPDATE ... WHERE quiz_id = ... AND id IN (...)` sets
+`review_status = 'approved'`. That one statement is Postgres's own atomic
+unit — all matching rows or none — so no RPC was needed, per the task's
+"prefer the smallest possible implementation" instruction. A single-
+question approve-selected skips the confirmation dialog (existing
+individual approve was never behind one either); 2+ selected or "approve
+all" show a confirm `AlertDialog` (reusing the exact component already in
+use elsewhere on this page).
+
+**Real end-to-end verification performed:**
+
+- Seeded 6 questions (3 MC + 3 TF) on a test quiz via the real,
+  authenticated `add_quiz_question` RPC — the same code path manual "Add
+  question" uses — instead of through PDF+Gemini generation, since Gemini
+  was returning sustained `503 UNAVAILABLE` "high demand" responses during
+  this session, unrelated to this feature (bulk approval behaves
+  identically regardless of a question's origin).
+- **Through a real browser**: selected 1 question → "Approve selected"
+  (no dialog) → only that question became approved, progress read "1 / 6
+  reviewed". Selected 2 more → "Approve selected" showed "Approve 2
+  selected questions?" → confirmed → exactly those 2 became approved,
+  the other 3 stayed pending (verified by counting "Pending review"
+  badges). Selected a 4th (3 of 6 selected) and confirmed the select-all
+  checkbox showed `data-indeterminate`; clicking it selected all 6
+  (`data-checked`); clicking it again deselected all. "Approve all" showed
+  its confirmation text ("All questions must be reviewed before this quiz
+  can be ready for publishing.") → confirmed → "6 / 6 reviewed" and "Ready
+  for publishing" appeared. Reloaded the quiz detail page: status still
+  `draft`. Reloaded the review page: state fully persisted. Re-selected an
+  already-approved question and hit "Approve selected" again — no error,
+  count stayed "6 / 6". "Approve all" was disabled once nothing was
+  pending.
+- **Invalid-question guard, through the real UI**: inserted a malformed
+  question directly via SQL (4 MC answers/1 correct — satisfies the DB's
+  own deferred trigger — but with a duplicate option text, which only
+  `validateQuestionShape` catches) and clicked "Approve all" — rejected
+  with `Can't approve "..." (Multiple Choice) has duplicate answer
+  options.`, progress stayed unchanged, nothing was approved.
+- **Security, both through the page and directly against the database**:
+  a second real teacher account got `404` on the review page; a direct
+  bulk `UPDATE ... WHERE quiz_id = ... AND id IN (...)` attempt (the exact
+  query shape the new actions run) against every one of the first
+  teacher's question ids matched 0 rows; a direct bulk `SELECT` of the
+  same ids returned 0 rows; the first teacher's `review_status` values
+  were confirmed unchanged afterward. Unauthenticated access to the review
+  page redirected to `/login`.
+- **Cleanup**: both temporary teacher accounts and their Storage objects
+  removed via the Admin API; confirmed the database contains only the one
+  pre-existing real account and quiz. All temporary scripts and the
+  temporary `pdfkit`/`playwright` dev tools were removed — neither was
+  added to `package.json`.
+
+**Validation:** `npx tsc --noEmit`, `npm run lint`, and `npm run build` all
+clean; `/quizzes/[id]/review` still lists in the build's route table. No
+migration, so no SQL lint was needed.
