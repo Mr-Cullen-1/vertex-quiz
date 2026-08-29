@@ -168,18 +168,27 @@ gotcha as the one below but for the admin client. Details:
 [docs/database.md](./docs/database.md) → "Question management RPCs" and
 "Table privileges".
 
-**Phase 6 — no schema change.** `quizzes.status`'s `'published'` value,
-`published_at`, `ends_at` (deadline), and `access_code` (reused as the
-opaque student join token) all already existed from Phase 1. Published-
-quiz immutability needed zero new code — every question mutation/RPC
-already gated on `status = 'draft'`. **`service_role` re-verified still
-has no grants** (re-checked live, as this phase's instructions explicitly
-required before building student-facing code) — this is what's blocking
-`/join/{token}`/participants/quiz_sessions from being built yet. A
-minimal, NOT-yet-applied grant is proposed in
-[docs/database.md](./docs/database.md) → "service_role privileges";
-apply it (or decide on an alternative) before starting that part of
-Phase 7.
+**Phase 6 — no table/column schema change; one privilege migration.**
+`quizzes.status`'s `'published'` value, `published_at`, `ends_at`
+(deadline), `access_code` (the quiz-level join token), and
+`quiz_sessions.session_token` (the per-participant session token,
+`generateAccessToken()` reused verbatim for both) all already existed
+from Phase 1. Published-quiz immutability needed zero new code — every
+question mutation/RPC already gated on `status = 'draft'`. `service_role`
+had zero table grants (found in Phase 5, confirmed still true when Phase
+6 started) — reported rather than worked around, then fixed with exactly
+the proposed minimal grant (`quizzes`: `SELECT`; `participants`/
+`quiz_sessions`: `SELECT, INSERT`) once approved, via
+`20260830130000_grant_student_access_privileges.sql`. Verified live
+afterward: `service_role` has exactly those five grants and nothing
+more, `anon` unchanged. Details: [docs/database.md](./docs/database.md)
+→ "service_role privileges".
+
+Note on phase numbering: this closes out what the original table below
+called Phase 7 ("Student entry and session") too — the approved Phase 6
+task explicitly scoped in `/join/{token}`, participant creation, and
+quiz_session creation. Phase 8 ("Student quiz experience" — the actual
+question-answering UI) is the next real work.
 
 Full verification logs (Phase 1–6):
 [docs/development-progress.md](./docs/development-progress.md).
@@ -277,25 +286,27 @@ confirmation to continue.
 | 3 | Create Quiz and PDF upload | ✅ Done — PDF upload landed as part of Phase 4 |
 | 4 | Gemini AI extraction | ✅ Done — verified end-to-end with a real PDF and a real Gemini call |
 | 5 | Question review and editor | ✅ Done — approve/edit/add/delete/reorder, verified end-to-end |
-| 6 | Quiz settings and publishing | ⚠️ Partial — publishing done; student access blocked on a `service_role` grant decision |
-| 7 | Student entry and session | ⏳ Next — needs the Phase 6 `service_role` grant decision resolved first |
-| 8 | Student quiz experience | Not started |
+| 6 | Quiz publishing and student access | ✅ Done — publishing, access token, `/join/{token}`, participant + session creation, all verified end-to-end |
+| 7 | Student entry and session | ✅ Done — folded into Phase 6 above (see note below the table) |
+| 8 | Student quiz experience | ⏳ Next |
 | 9 | Results | Not started |
 | 10 | Analytics | Not started |
 | 11 | Final MVP polish | Not started |
 
-**Current phase:** 6 (Quiz settings and publishing) — **partially
-complete**. A teacher can publish a ready quiz (every question approved,
-composition verified server-side) via an explicit confirm dialog; the
-quiz becomes `published`, immutable (verified directly, including as the
-owning teacher hitting the question RPCs straight), and gets a real
-opaque access token shown as a copyable student link. **Student access is
-not built**: `service_role` has no table grants on this project (verified
-live), so the public `/join/{token}` route, participant creation, and
-quiz_session creation have no way to read a quiz or write those tables
-server-side yet. A minimal grant is proposed but not applied — see
-[docs/database.md](./docs/database.md) → "service_role privileges".
-**Next:** resolve that grant decision, then continue Phase 7 — Student
-entry and session.
+**Current phase:** 6 (Quiz publishing and student access) — **complete**.
+A teacher can publish a ready quiz (every question approved, composition
+verified server-side) via an explicit confirm dialog; the quiz becomes
+`published`, immutable (verified directly, including as the owning
+teacher hitting the question RPCs straight), and gets a real opaque
+access token shown as a copyable student link. A student can open
+`/join/{token}`, see the quiz's info, submit their first/last name
+(server-validated, server-side deadline check run twice — at page load
+and again at submit), and get a real `participants` + `quiz_sessions`
+row, landing on a placeholder `/quiz/{session_token}` page that Phase 8
+will build the real interface at. `service_role` needed a scoped grant
+first (`quizzes`: `SELECT`; `participants`/`quiz_sessions`: `SELECT,
+INSERT`) — reported and approved before being applied, never assumed.
+**Next phase:** 8 — Student quiz experience (the actual question-
+answering UI, timer enforcement, answer submission).
 
 Live status detail: [docs/development-progress.md](./docs/development-progress.md).

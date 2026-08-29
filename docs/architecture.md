@@ -38,10 +38,16 @@ system of record besides Gemini.
   `/quizzes/new`, `/quizzes/[id]`, and `/quizzes/[id]/edit` (draft
   creation/viewing/editing) added in Phase 3; PDF upload + Gemini
   generation added in Phase 4; `/quizzes/[id]/review` (question review,
-  edit, add, delete, reorder, approve) added in Phase 5. Publishing still
-  doesn't exist — see "Quiz lifecycle" below.
-- `app/(student)/join/[code]/...` — public student flow. No authentication;
-  identity is a per-session token created on entry. Added in Phase 7.
+  edit, add, delete, reorder, approve) added in Phase 5; publishing (the
+  "Publish" button, student access link) added in Phase 6 — see "Quiz
+  lifecycle" and "Publishing" below.
+- `app/(student)/join/[token]/...` — public student flow: validate the
+  quiz's access token, show quiz info, collect first/last name, create a
+  participant + quiz_session. No authentication; identity is the
+  `quiz_sessions.session_token` created on entry. Added in Phase 6 (the
+  actual question-answering UI at `app/(student)/quiz/[sessionToken]/` is
+  a placeholder — Phase 7 builds the real interface there). See "Student
+  access" below.
 - `app/page.tsx` — minimal public landing/status page (Phase 0).
 
 Route protection uses the Next.js 16 `proxy.ts` convention (exported
@@ -100,7 +106,7 @@ draft with questions (pending review)
 draft, all questions approved → "ready for publishing" (computed, not persisted)
   │  teacher explicitly clicks Publish (Phase 6, this — server-side re-verified)
   ▼
-published ── student access via /join/{access_code} (Phase 7 — blocked, see below) ──> closed
+published ── student joins via /join/{access_code}, gets a session (Phase 6) ──> closed
 ```
 
 "Ready for publishing" is intentionally **not** a `quizzes.status` value —
@@ -111,21 +117,16 @@ actual publish Server Action (`publishQuiz`, Phase 6) independently
 re-derives every condition from the database before writing anything — see
 "Publishing" below.
 
-**Phase 6 status: publishing is fully implemented; student access is
-not.** The teacher-facing half (readiness check, the `publishQuiz` action,
-the access-token/join-URL, and published-quiz immutability) is built and
-verified end-to-end. The public `/join/{token}` route and participant/
-session creation are **not implemented** — they're blocked on a real,
-verified gap: `service_role` currently has no table grants on this
-project (confirmed live, same class of issue as the Phase 2
-`authenticated` gotcha), and the student flow's server-side code has no
-other legitimate way to read a quiz or write a participant/session without
-either that grant or a new anon-facing RLS policy — both of which are
-schema/security changes the task's own instructions say must stop for
-review rather than be applied unilaterally. See "Student access — blocked
-pending a service_role grant decision" below and
-[database.md](./database.md) → "service_role privileges" for the full
-finding.
+**Phase 6 status: complete.** Both halves are built and verified
+end-to-end: the teacher-facing side (readiness check, `publishQuiz`,
+access token/join-URL, published-quiz immutability) and the student
+access side (`/join/{token}`, first/last name collection, participant +
+quiz_session creation, deadline enforcement). The student side needed a
+scoped `service_role` grant first — found insufficient in Phase 6's first
+pass, reported rather than silently fixed, then applied after explicit
+approval. See "Student access" below and [database.md](./database.md) →
+"service_role privileges" for the full finding and the exact grant
+applied.
 
 Phase 3 implements quiz metadata: a teacher creates a `quizzes` row with a
 title, optional description, a fixed `multiple_choice_count` /
@@ -355,32 +356,92 @@ the *quiz* (one per published quiz). A future Phase 7 `quiz_sessions`
 session identifier would be a *different*, per-participant, single-use
 value — the two must never be conflated or interchanged.
 
-## Student access — blocked pending a service_role grant decision
+## Student access (Phase 6)
 
-Phase 6's task explicitly required verifying `service_role`'s real table
-privileges *before* building student-facing participant/session creation,
-and explicitly required stopping — not silently granting anything — if
-they were insufficient. They are: confirmed live (`information_schema.
-role_table_grants`) that `service_role` has only `REFERENCES`/`TRIGGER`/
-`TRUNCATE` on every `public` table — no `SELECT`/`INSERT`/`UPDATE` on
-`quizzes`, `participants`, or `quiz_sessions`. This is the same "no
-auto-grant on this project" characteristic Phase 2 found for
-`authenticated` (see database.md → "Table privileges"), just never
-exercised by `service_role` before now, since Phase 1–5's admin-client
-usage (`auth.admin.*`, Storage) isn't gated by these table grants at all.
+**Unblocked by a scoped `service_role` grant, applied after explicit
+approval.** Phase 6 initially stopped here — student-facing code has no
+Supabase Auth session to key RLS off, so it needs the service-role admin
+client for everything, and that client had zero table grants (see
+database.md → "service_role privileges" for the full investigation). The
+approved fix was the smallest grant that unblocks exactly this flow:
 
-Concretely, this blocks the entire public `/join/{token}` route: a
-student's browser has no Supabase session (no `authenticated` role), so
-the only way to read a quiz by its `access_code` or write a `participants`/
-`quiz_sessions` row server-side is the service-role admin client — and it
-currently can't do either. Building `/join/{token}` today would mean
-either (a) applying a `service_role` grant migration, or (b) adding a new
-`anon`-facing RLS policy on `quizzes` — both are exactly the kind of
-schema/RLS change this task's instructions require stopping for. Neither
-was applied. See [database.md](./database.md) → "service_role privileges"
-for the proposed minimal grant (not yet applied) and the full reasoning
-for why option (a) — not a new anon RLS policy — is the right shape when
-this is approved.
+```sql
+grant select on public.quizzes to service_role;
+grant select, insert on public.participants to service_role;
+grant select, insert on public.quiz_sessions to service_role;
+```
+
+Applied via migration `20260830130000_grant_student_access_privileges.sql`
+and verified live afterward — `service_role` has exactly those five
+grants and nothing else (no `UPDATE`/`DELETE` anywhere, no `responses`
+access), `anon`'s grants are unchanged (still nothing), and no RLS policy
+was touched — `service_role` already has `rolbypassrls = true`, so the
+grant alone is sufficient.
+
+```
+Student opens /join/{access_code}
+  → src/lib/student/access.ts: loadPublishedQuizByToken(token)
+      admin client: SELECT quizzes WHERE access_code = token AND status = 'published'
+      → no row (wrong token, draft, or closed quiz — all indistinguishable)
+        or a past ends_at → same "not available" family of responses
+  → renders quiz info (title, MC/TF/total counts, time limit, deadline)
+    + first/last name form
+  → src/lib/student/join-actions.ts: startSession(token, formData)
+      re-validates the token AND the deadline again (never trusts the
+      page's earlier check — a student can submit long after page load)
+      → INSERT participants (quiz_id from the re-validated token, never
+        from the client)
+      → INSERT quiz_sessions (status='started', started_at=now(),
+        expires_at computed from duration_minutes/ends_at/a 24h fallback,
+        session_token = a fresh opaque token, total_questions snapshotted
+        from the quiz)
+  → redirect to /quiz/{session_token} — a placeholder confirmation page;
+    the actual question-answering UI is Phase 7, not built here
+```
+
+**Reused the existing token machinery — no second token system.**
+`generateAccessToken()` (Phase 6 publishing, `crypto.randomBytes(24)`
+base64url) is called again, unchanged, to mint
+`quiz_sessions.session_token` — a schema column Phase 1 already
+provisioned for exactly this ("a unique session with its own secure
+identifier"), sitting unused until now. The quiz-level `access_code` and
+the session-level `session_token` are deliberately different values with
+different lifetimes (one long-lived link per quiz; one single-use token
+per participant) and are never interchangeable.
+
+**Deadline enforcement is server-side and re-checked twice.**
+`loadPublishedQuizByToken` compares `ends_at` against `Date.now()` both
+when the join page renders *and* again inside `startSession` at submit
+time — a student who opens the page before the deadline and submits after
+it passes is still blocked, because the second check runs fresh, not
+because the first one's result was cached or trusted.
+
+**Duplicate-start protection is a client-side reentrancy guard, not
+server-side deduplication.** `JoinForm` guards `handleSubmit` with a
+`useRef` flag (not just `isSubmitting` state) checked *before* anything
+else runs: a ref mutation is synchronous and visible to the very next
+invocation immediately, whereas React state only reaches the DOM's
+`disabled` attribute on the next render — which is late enough for two
+back-to-back clicks to both start the handler. This was verified to
+matter: an initial version using only state let two rapid clicks create
+two participants; switching the guard to a ref (still purely client-side,
+no server changes) fixed it. Reopening the join link later is intentionally
+allowed to start a brand-new, independent session — first + last name are
+never treated as a unique identity, and no matching against past
+participants is attempted, per the task's own explicit MVP direction.
+
+**No new database identifiers are ever exposed to the student.** The
+join URL carries only the quiz's `access_code`; the post-start URL
+carries only the session's `session_token`. Neither `quizzes.id`,
+`participants.id`, `quiz_sessions.id`, nor the teacher's id ever appears
+in a URL, a form field, or rendered text on either student-facing page.
+
+**`/quiz/[sessionToken]` is a placeholder, not Phase 7.** It looks up the
+session by `session_token` (service-role client, same reasoning as
+above), shows the participant's first name and the quiz title, and
+explicitly says the quiz itself opens in a future update — no question
+data, no timer, no navigation. This is the literal continuation point
+Phase 7 will build the real quiz-taking UI at.
 
 **"Ready for publishing" is computed, never persisted** — see "Quiz
 lifecycle" above.
@@ -478,8 +539,10 @@ src/
       results/              Empty-state shell, Phase 9/10 fill it in
       settings/             Read-only account info (real profile data)
       _components/          Sidebar, Header, StatCard, mobile nav (Sheet-based)
-    (student)/join/[token]/ Phase 7+ — blocked on a service_role grant
-                             decision, see "Student access" above
+    (student)/               Phase 6 — public, no auth, no admin chrome
+      join/[token]/            Validate token, show quiz info, collect name, start a session
+        _components/             join-form.tsx
+      quiz/[sessionToken]/     Placeholder confirmation page — Phase 7 builds the real UI here
   components/
     ui/                   shadcn/ui primitives
   lib/
@@ -496,8 +559,12 @@ src/
       question-rules.ts           Phase 5 — validateQuestionShape, shared with gemini/validate.ts
       question-schema.ts           Phase 5 — Zod shape for manual question input
       question-actions.ts           Phase 5 — add/update/delete/reorder/setReviewStatus
-      access-token.ts                Phase 6 — generateAccessToken() (crypto.randomBytes)
+      access-token.ts                Phase 6 — generateAccessToken() (crypto.randomBytes), reused for session_token too
       publish-actions.ts              Phase 6 — publishQuiz
+    student/
+      schema.ts                Phase 6 — Zod shape for first/last name input
+      access.ts                 Phase 6 — loadPublishedQuizByToken (service-role client)
+      join-actions.ts             Phase 6 — startSession (participant + quiz_session creation)
     gemini/
       client.ts               Phase 4 — server-only GoogleGenAI client
       prompt.ts                Phase 4 — extraction prompt builder
@@ -511,7 +578,7 @@ src/
       assert-no-error.ts       Phase 2 — throw-on-Supabase-error helper
   proxy.ts                 Phase 1/2 — session refresh + optimistic redirects
 supabase/
-  migrations/              Phase 1–5 — SQL schema + RLS + grants + Storage + RPC, via Supabase CLI
+  migrations/              Phase 1–6 — SQL schema + RLS + grants + Storage + RPC, via Supabase CLI
 docs/                     Reference documentation (this directory)
 ```
 

@@ -986,7 +986,7 @@ use elsewhere on this page).
 clean; `/quizzes/[id]/review` still lists in the build's route table. No
 migration, so no SQL lint was needed.
 
-## Phase 6 — Quiz publishing (teacher-facing half only) ⚠️ partial
+## Phase 6 — Quiz publishing + student access ✅ (completed across two sessions — see below)
 
 **Date:** 2026-08-29
 
@@ -1106,3 +1106,121 @@ decision above:** `/join/[token]` public route, student identity
 collection, participant creation, quiz_session creation, deadline
 enforcement against real student session starts. None of this is
 documented as done anywhere else in these docs.
+
+## Phase 6 (continued) — Student access ✅
+
+**Date:** 2026-08-29 (same day, approved follow-up to the partial Phase 6
+report above)
+
+**The proposed `service_role` grant was reviewed and approved, applied
+exactly as proposed, then the remaining Phase 6 student-access flow was
+built.**
+
+**1. Migration applied:**
+`supabase/migrations/20260830130000_grant_student_access_privileges.sql`
+— `grant select on public.quizzes to service_role;` plus
+`grant select, insert on public.participants to service_role;` and the
+same for `quiz_sessions`. Applied via `npx supabase db push`. Re-verified
+live afterward: `service_role` has exactly those five (table, privilege)
+pairs and nothing else — no `UPDATE`/`DELETE` anywhere, no `responses`
+access, no `INSERT` on `quizzes`. `anon`'s grants unchanged (still zero
+rows). `npx supabase migration list` shows all 7 migrations in sync
+between local and remote.
+
+**2. What was built:**
+
+- `src/lib/student/schema.ts` — Zod shape for first/last name (trims,
+  collapses internal whitespace, 80-char cap, both required).
+- `src/lib/student/access.ts` — `loadPublishedQuizByToken(token)`: the
+  service-role client's one read, `quizzes` filtered to `access_code =
+  token AND status = 'published'` in a single query (so a wrong token, a
+  draft quiz, and a closed quiz are all indistinguishable — same
+  "don't leak which" pattern RLS already uses for teacher data), plus an
+  authoritative `ends_at` vs. `Date.now()` check.
+- `src/lib/student/join-actions.ts` — `startSession(token, formData)`:
+  re-validates the token *and* the deadline again (not just trusting the
+  page's earlier check), then creates a `participants` row (quiz_id from
+  the re-validated token, never the client) and a `quiz_sessions` row
+  (`status: 'started'`, `expires_at` computed from `duration_minutes` →
+  `ends_at` → a 24h fallback, `session_token` from the same
+  `generateAccessToken()` used for quiz publishing, retried up to 3 times
+  on collision) — both via the now-privileged service-role client.
+- `src/app/(student)/join/[token]/page.tsx` + `_components/join-form.tsx`
+  — public, unauthenticated join page: Vertex logo, quiz title/
+  description, a composition summary (total/MC/TF counts, time limit,
+  deadline if set), and the name form; shows a clear "no longer
+  available" or "link isn't valid" state instead when access fails.
+- `src/app/(student)/quiz/[sessionToken]/page.tsx` — the Phase 7 entry
+  point stub: confirms the session by its opaque `session_token`, shows
+  the participant's first name and quiz title, explicitly says the quiz
+  interface is coming later. No question data, no navigation, no timer.
+
+**No second token system** — `generateAccessToken()` (Phase 6 publishing)
+is reused verbatim for `quiz_sessions.session_token`, a column Phase 1
+already provisioned for exactly this purpose.
+
+**3. Real end-to-end verification performed (not just code review):**
+
+- **Full teacher → student flow through real browsers**: published a
+  quiz (4 questions, 15-minute limit) through the actual publish UI,
+  opened the resulting `/join/{token}` link in a separate unauthenticated
+  browser context, confirmed the quiz info rendered correctly, submitted
+  a real name, was redirected to `/quiz/{session_token}`, and confirmed
+  the confirmation page showed the right name and quiz title. Read the
+  database directly: participant and quiz_session rows existed with the
+  correct `quiz_id`/`participant_id` references, `status = 'started'`,
+  `total_questions = 4`, and zero `responses` rows.
+- **Deadline, both directions**: a quiz published with a deadline one
+  hour in the past showed "This quiz is no longer available" with no
+  form at all; a quiz published with a deadline 24 hours out showed the
+  real Start form.
+- **Invalid token and draft-quiz protection**: a nonexistent token showed
+  "This quiz link isn't valid"; a freshly-created draft quiz was
+  confirmed to have `access_code = null` — there's no token to guess
+  before publish.
+- **Double-click protection — a real bug caught by testing, then
+  fixed**: the first implementation (disabling the Start button via React
+  state) let two near-simultaneous clicks both create a participant —
+  reproduced with two real clicks fired back-to-back, confirmed via a
+  direct database count (2 participants for one interaction). Fixed with
+  a `useRef` synchronous reentrancy guard in `JoinForm` (still entirely
+  client-side, no server/schema change) and re-verified the identical
+  scenario now produces exactly one participant and one session.
+- **Security**: a second real teacher account got zero rows reading the
+  first teacher's published quiz and a real ownership error attempting
+  `delete_quiz_question` on one of its questions; the *owning* teacher's
+  own `delete_quiz_question` call against a question on her own
+  now-published quiz also failed ("Only draft quizzes can be edited.") —
+  re-confirming publish-time immutability on a freshly published quiz,
+  not just the one from the first Phase 6 session. An unauthenticated
+  session was confirmed still blocked from `/quizzes` (teacher routes).
+- **No secret leakage**: re-checked a fresh production build's
+  `.next/static` for `SUPABASE_SECRET_KEY` and `GEMINI_API_KEY` — zero
+  matches. Confirmed every `createAdminClient()` call site is inside a
+  `server-only`- or `"use server"`-guarded module.
+- **Cleanup**: deleted both temporary teacher accounts (cascading to
+  their quizzes, which cascades to every participant/session row created
+  during testing) via the Admin API. Confirmed afterward: `participants`
+  and `quiz_sessions` both contain zero rows project-wide; `auth.users`
+  and `quizzes` contain only the one pre-existing real account and its
+  own quiz. All temporary scripts and the temporary `playwright`
+  dependency were removed — never added to `package.json`.
+
+**Validation:** `npx tsc --noEmit`, `npm run lint`, `npm run build`, and
+`npm run lint:sql` (all 7 migrations, including the new grant migration)
+all clean. `npx supabase migration list` confirms local/remote match.
+
+**Repeat-participation MVP decision (documented, not just implemented):**
+reopening a join link always starts a new, independent participant +
+session — first/last name are never used to detect "the same student
+again," matching the task's explicit instruction not to attempt identity
+matching by name. This means a student who re-joins after a page reload
+or browser crash gets a second session rather than resuming the first;
+resuming a specific in-progress session is not part of the MVP and isn't
+implemented.
+
+**Still not implemented — Phase 7 and later, not claimed anywhere in
+these docs as done:** the actual question-answering interface, answer
+submission, response recording, countdown/timer enforcement against
+`expires_at`, question/answer randomization, scoring, results, and
+anything past the `/quiz/[sessionToken]` placeholder page.

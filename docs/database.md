@@ -11,14 +11,16 @@ function — no `quizzes`/`questions`/`answers` table/column changes; the
 new Postgres functions for atomic question add/edit/delete/reorder — no
 new tables, and `quizzes.status`'s check constraint is untouched ("ready
 for publishing" is computed, never persisted — see architecture.md).
-Phase 6 (publishing) required **no schema change at all** —
-`quizzes.status`'s existing `'published'` value, `published_at`, `ends_at`
-(the deadline), and `access_code` (reused as the opaque student token)
-were all added back in Phase 1 and sat unused until now. Phase 6's
-student-facing half (`/join/{token}`, participants, quiz_sessions) is
-**not implemented** — blocked on a `service_role` grant decision, see
-"service_role privileges" below. SQL migrations live under
-`supabase/migrations/`:
+Phase 6 (publishing + student access) required **no table/column schema
+change** — `quizzes.status`'s existing `'published'` value,
+`published_at`, `ends_at` (the deadline), `access_code` (reused as the
+opaque quiz token), and `quiz_sessions.session_token` (reused as the
+opaque per-participant session token) were all added back in Phase 1 and
+sat unused until now. It did require one privilege migration: `service_role`
+had zero table grants (found in Phase 5, confirmed still true at the start
+of Phase 6), which blocked the student-facing half entirely until a
+minimal, explicitly-approved grant was applied — see "service_role
+privileges" below. SQL migrations live under `supabase/migrations/`:
 
 - `20260829120000_create_core_schema.sql` — tables, indexes, constraints,
   triggers.
@@ -33,17 +35,20 @@ student-facing half (`/join/{token}`, participants, quiz_sessions) is
 - `20260830120000_add_question_management.sql` — `questions.review_status`
   column, plus `add_quiz_question()`/`update_quiz_question()`/
   `delete_quiz_question()`/`reorder_quiz_questions()` (Phase 5).
+- `20260830130000_grant_student_access_privileges.sql` — the `service_role`
+  grants student access needed (Phase 6) — see "service_role privileges"
+  below.
 
-`npx supabase migration list` confirms all six are recorded as applied on
-the remote (local and remote timestamps match). Everything below was
+`npx supabase migration list` confirms all seven are recorded as applied
+on the remote (local and remote timestamps match). Everything below was
 independently re-verified by querying the live database directly
 (`supabase db query --linked`) — not just re-reading the migration files —
 including a functional test of the deferred answer-count trigger (insert
 invalid/valid answer sets inside a transaction, then roll back), a real
-teacher login against the deployed app, and (Phase 4/5) real PDFs/questions
-uploaded and processed through the actual running application. See
-[development-progress.md](./development-progress.md) Phase 1–5 for the
-full verification logs and exact results.
+teacher login against the deployed app, and (Phase 4/5/6) real PDFs/
+questions/quizzes/student sessions created through the actual running
+application. See [development-progress.md](./development-progress.md)
+Phase 1–6 for the full verification logs and exact results.
 
 ## Table privileges — a Phase 1 gap fixed in Phase 2
 
@@ -72,7 +77,7 @@ Supabase directly from the browser, so there is nothing for `anon` to need.
 RLS itself, its 17 policies, and every ownership rule are unchanged by this
 migration; it only unblocks the access those policies already described.
 
-### `service_role` privileges — discovered in Phase 5, re-verified and scoped in Phase 6, still not fixed
+### `service_role` privileges — discovered in Phase 5, scoped and fixed in Phase 6
 
 While writing Phase 5's test/verification scripts, a direct
 `admin.from("questions").select(...)` call (using the `SUPABASE_SECRET_KEY`
@@ -99,32 +104,16 @@ missing.** Re-ran the exact same live check
 (`information_schema.role_table_grants` filtered to `grantee =
 'service_role'`) — still zero `SELECT`/`INSERT`/`UPDATE`/`DELETE` grants
 on any table, confirmed unchanged. Per that instruction, the public
-`/join/{token}` route and participant/session creation were **not
-built** in Phase 6 — see [architecture.md](./architecture.md) → "Student
-access — blocked pending a service_role grant decision".
+`/join/{token}` route and participant/session creation were **not built**
+in Phase 6's first pass — reported instead, with the exact grant proposed
+below, and the student-access work only started after that grant was
+explicitly approved and applied.
 
-**Current privileges (`service_role`, every table):** `REFERENCES`,
-`TRIGGER`, `TRUNCATE` only.
+**Privileges before the fix (`service_role`, every table):**
+`REFERENCES`, `TRIGGER`, `TRUNCATE` only.
 
-**Required privileges for the student flow Phase 7 will build**, scoped
-to exactly what that flow needs and nothing more:
-
-| Table | Grant needed | Why |
-|---|---|---|
-| `quizzes` | `SELECT` | The public join page has no Supabase session (no `authenticated` role) — reading a quiz by `access_code`, checking `status = 'published'` and the deadline, and showing its composition/time limit can only happen through the service-role client. |
-| `participants` | `SELECT`, `INSERT` | Create the student's participant row; `SELECT` is needed for PostgREST to return the inserted row (`.select()` after `.insert()`). |
-| `quiz_sessions` | `SELECT`, `INSERT` | Create the session row referencing the quiz + participant; same `.select()`-after-`.insert()` reasoning. |
-
-**Deliberately NOT proposed yet:** `UPDATE` on `participants`/
-`quiz_sessions` (nothing in the planned student-join flow updates either
-after creation) and anything on `responses`/`questions`/`answers`
-(Phase 6/7's join flow doesn't touch responses at all — that's the actual
-quiz-taking phase). Granting ahead of actual need is exactly what "do not
-blindly grant permissions" rules out; the table above should be revisited
-and extended (not re-derived from scratch) when the phase that needs
-`responses`/session updates is actually built.
-
-**Proposed minimal migration (NOT applied — pending an explicit decision):**
+**Applied migration** —
+`20260830130000_grant_student_access_privileges.sql`:
 
 ```sql
 grant select on public.quizzes to service_role;
@@ -132,13 +121,30 @@ grant select, insert on public.participants to service_role;
 grant select, insert on public.quiz_sessions to service_role;
 ```
 
-This does not touch RLS at all — `service_role` already has
-`rolbypassrls = true`, so once granted, no policy changes are needed or
-proposed. It also does not touch `anon`'s or `authenticated`'s grants,
-and does not add a new RLS policy anywhere (an `anon`-facing `SELECT`
-policy on `quizzes` was considered and rejected as the wrong shape for
-this project — see architecture.md — since it would create public
-enumeration surface a service-role-only read does not).
+| Table | Grant | Why |
+|---|---|---|
+| `quizzes` | `SELECT` | The public join page has no Supabase session (no `authenticated` role) — reading a quiz by `access_code`, checking `status = 'published'` and the deadline, and showing its composition/time limit can only happen through the service-role client. |
+| `participants` | `SELECT`, `INSERT` | Create the student's participant row; `SELECT` is needed for PostgREST to return the inserted row (`.select()` after `.insert()`). |
+| `quiz_sessions` | `SELECT`, `INSERT` | Create the session row referencing the quiz + participant; same `.select()`-after-`.insert()` reasoning. |
+
+**Deliberately not granted:** `INSERT`/`UPDATE`/`DELETE` on `quizzes`
+(publishing/editing stays exclusively a teacher/`authenticated`
+operation), `UPDATE`/`DELETE` on `participants`/`quiz_sessions` (nothing
+in the Phase 6 join flow modifies either after creation — session status
+transitions belong to Phase 7/8), and anything at all on `responses`
+(untouched until the actual quiz-taking phase). This was verified live
+after applying the migration, not assumed: `information_schema.
+role_table_grants` for `service_role` shows exactly the five
+select/insert grants above and nothing else, and `anon`'s grants
+(still zero rows) and `authenticated`'s grants (unchanged from Phase 2)
+were both re-checked at the same time.
+
+This did not touch RLS at all — `service_role` already had
+`rolbypassrls = true`, so the grant alone was sufficient; no policy was
+added, changed, or needed. An `anon`-facing `SELECT` policy on `quizzes`
+was considered and rejected as the wrong shape for this project, since it
+would create a public-enumeration surface a service-role-only read does
+not.
 
 ## Principles
 
@@ -248,14 +254,17 @@ questions; exactly 2 answers with exactly 1 `is_correct = true` for
 
 ### `participants`
 
-A student's identity for one quiz — no `auth.users` row.
+A student's identity for one quiz — no `auth.users` row. Written by
+`src/lib/student/join-actions.ts` (Phase 6) through the service-role
+client; `quiz_id` always comes from the access token the server just
+validated, never from the client.
 
 | Column      | Type        | Notes                          |
 | ----------- | ----------- | -------------------------------- |
 | id          | uuid PK     |                                   |
 | quiz_id     | uuid FK     | → `quizzes.id`, `ON DELETE CASCADE` |
-| first_name  | text        | not null, non-empty              |
-| last_name   | text        | not null, non-empty              |
+| first_name  | text        | not null, non-empty; trimmed + whitespace-collapsed before insert |
+| last_name   | text        | not null, non-empty; trimmed + whitespace-collapsed before insert |
 | created_at  | timestamptz | default `now()`                  |
 
 Index: `participants (quiz_id)`.
@@ -279,9 +288,17 @@ Index: `participants (quiz_id)`.
 | created_at      | timestamptz | default `now()`                                                |
 
 Indexes: `quiz_sessions (quiz_id)`, `quiz_sessions (participant_id)`.
-Deliberately no `unique (quiz_id, participant_id)` — the MVP hasn't decided
-the re-entry policy yet (Phase 7); enforce whatever is decided in
-application code once it is.
+Deliberately no `unique (quiz_id, participant_id)` — Phase 6 decided the
+MVP re-entry policy: reopening a join link starts a brand-new,
+independent participant + session (first/last name are never treated as
+a unique identity, so no dedup is attempted). Rows are written by
+`src/lib/student/join-actions.ts` through the service-role client;
+`session_token` reuses `generateAccessToken()` from the Phase 6 publish
+flow (a fresh random value each call, retried up to 3 times on the
+astronomically unlikely unique-constraint collision). `question_order`
+stays at its `[]` default and `status` is always inserted as `'started'`
+— Phase 6 only creates the row; shuffling, status transitions, and
+`expires_at` enforcement against real answers are Phase 7.
 
 ### `responses`
 
@@ -760,4 +777,67 @@ privilege re-check, using two temporary teacher accounts.
 - **Cleanup**: deleted both temporary teacher accounts (cascading to their
   quizzes/questions/answers) via the Admin API. Confirmed afterward:
   `auth.users` and `quizzes` contain only the one pre-existing real
+  account and its own quiz.
+
+## Live verification — Phase 6 student access (2026-08-29)
+
+Migration `20260830130000_grant_student_access_privileges.sql` applied via
+`npx supabase db push` and independently re-verified against the live
+database — see "service_role privileges" above for the exact grants
+confirmed (`quizzes`: `SELECT`; `participants`/`quiz_sessions`: `SELECT,
+INSERT`; nothing else, `anon` unchanged, `authenticated` unchanged,
+`responses` untouched). `npx supabase migration list` confirmed all seven
+migrations in sync between local and remote.
+
+- **Real join → start → session, end to end**: published a quiz (4
+  questions, 15-minute limit) through the real teacher UI, opened its
+  `/join/{access_code}` link in a separate, unauthenticated browser
+  context, confirmed the quiz title/composition/time limit rendered
+  correctly, submitted a real first/last name, and was redirected to
+  `/quiz/{session_token}`. Read the database directly afterward: a
+  `participants` row existed with the exact submitted name and the
+  correct `quiz_id`; a `quiz_sessions` row existed referencing that exact
+  `quiz_id` and `participant_id`, with `status = 'started'` and
+  `total_questions = 4` (matching the quiz); zero rows in `responses`.
+- **Deadline enforcement, both directions, server-side**: a quiz published
+  with `ends_at` one hour in the past showed "This quiz is no longer
+  available" with no name form rendered at all (not just a disabled
+  button) when opened fresh; a quiz published with `ends_at` 24 hours out
+  showed the real Start form. Both checks ran through
+  `loadPublishedQuizByToken`, which is called again inside `startSession`
+  at submit time — not only at page-render time.
+- **Invalid access**: a syntactically plausible but nonexistent token
+  showed "This quiz link isn't valid" — the identical message an
+  unpublished/expired quiz's real token would produce, so a wrong guess
+  can't be distinguished from "not published yet." A freshly-created
+  draft (never published) quiz was confirmed to have `access_code = null`
+  — there is no token for an attacker to even try before publish.
+- **Double-click / duplicate-submission protection**: an initial
+  implementation using only React state to disable the Start button let
+  two near-simultaneous clicks both invoke the start action, producing
+  two participants for one interaction — caught directly by this testing,
+  not assumed safe. Fixed with a `useRef`-based synchronous reentrancy
+  guard (client-side only; no server/schema change). Re-tested the exact
+  same double-click scenario afterward: exactly one participant and one
+  session were created.
+- **Cross-tenant and ownership, directly against the database**: a second
+  real teacher account got zero rows reading the first teacher's
+  published quiz (RLS `quizzes_select_own`) and a real "not found" error
+  calling `delete_quiz_question` against one of its questions. The first
+  teacher's own `delete_quiz_question` call against a question on her
+  *own* now-published quiz also failed ("Only draft quizzes can be
+  edited.") — re-confirming Phase 6's publish-time immutability holds
+  for this quiz too, not just the one tested when publishing was first
+  built.
+- **No secret leakage**: re-checked a fresh production build's
+  `.next/static` for `SUPABASE_SECRET_KEY` and `GEMINI_API_KEY` — zero
+  matches. Confirmed `createAdminClient` is only imported from
+  `server-only`-guarded or `"use server"` modules (`src/lib/student/
+  access.ts`, `join-actions.ts`, and the `quiz/[sessionToken]` Server
+  Component) — never from a Client Component.
+- **Cleanup**: deleted both temporary teacher accounts (cascading to their
+  quizzes, which cascades to every `participants`/`quiz_sessions` row
+  created during testing) via the Admin API. Confirmed afterward:
+  `participants` and `quiz_sessions` both contain zero rows project-wide,
+  and `auth.users`/`quizzes` contain only the one pre-existing real
   account and its own quiz.
