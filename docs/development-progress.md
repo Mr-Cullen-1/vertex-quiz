@@ -985,3 +985,124 @@ use elsewhere on this page).
 **Validation:** `npx tsc --noEmit`, `npm run lint`, and `npm run build` all
 clean; `/quizzes/[id]/review` still lists in the build's route table. No
 migration, so no SQL lint was needed.
+
+## Phase 6 — Quiz publishing (teacher-facing half only) ⚠️ partial
+
+**Date:** 2026-08-29
+
+**Status: teacher-facing publishing is done and verified. Student access
+(`/join/{token}`, participants, quiz_sessions) is explicitly NOT
+implemented — blocked on a real, verified `service_role` privilege gap,
+exactly as the task's own instructions required stopping for.**
+
+**Database check performed first, as required:** re-ran the live
+`information_schema.role_table_grants` query for `grantee =
+'service_role'` before writing any student-facing code. Confirmed
+(matching Phase 5's earlier, separate discovery): `service_role` has only
+`REFERENCES`/`TRIGGER`/`TRUNCATE` on every table — no `SELECT`/`INSERT`/
+`UPDATE` anywhere, including `quizzes`, `participants`, `quiz_sessions`.
+Per the task's explicit instruction ("If service_role lacks the
+privileges required for the planned server-side student flow: STOP
+before implementing the dependent functionality"), the public join route
+and participant/session creation were not built. Proposed minimal grant
+(NOT applied): `SELECT` on `quizzes`; `SELECT, INSERT` on `participants`
+and `quiz_sessions` — full reasoning and the exact SQL in
+[docs/database.md](./docs/database.md) → "service_role privileges".
+
+**What was built (no service_role dependency — uses the `authenticated`
+role's existing full grants):**
+
+- **No schema change** — verified `quizzes.status` already supports
+  `'published'`, and `published_at`/`ends_at`/`access_code` already
+  existed from Phase 1, unused until now. `duration_minutes`
+  (already teacher-configurable since Phase 3) is reused as-is.
+- `src/lib/quizzes/access-token.ts` — `generateAccessToken()`:
+  `crypto.randomBytes(24)` base64url-encoded (32 URL-safe chars, ~192
+  bits entropy) — never the quiz UUID, never sequential, never derived
+  from the title/timestamp.
+- `src/lib/quizzes/publish-actions.ts` — `publishQuiz(quizId)`: reuses
+  `requireSession`/`loadOwnedDraftQuiz` (Phase 5) for auth + ownership +
+  draft-status, then independently re-derives every readiness condition
+  from the database (at least 1 question, every question approved, actual
+  MC/TF/total counts match the quiz's configured counts, every question
+  still passes `validateQuestionShape`) before writing `status =
+  'published'`, `published_at`, and a fresh `access_code`. Retries token
+  generation up to 3 times on the astronomically unlikely unique-
+  constraint collision.
+- `PublishQuizButton` (`_components/publish-quiz-button.tsx`) — the exact
+  confirmation copy specified ("Publish this quiz?" / "Students will be
+  able to access this quiz using the generated link..."), reusing the
+  existing `AlertDialog` pattern.
+- `StudentAccessLink` (`_components/student-access-link.tsx`) — shows the
+  `NEXT_PUBLIC_APP_URL`-based join URL in a read-only input with a
+  working copy-to-clipboard button.
+- `/quizzes/[id]/page.tsx` — computes `readyForPublishing` (reuses
+  question/reviewed counts already queried for the Phase 5 review-progress
+  card), shows the Publish button only when ready, shows the student link
+  once published, shows a "Published" timestamp row, and replaces the old
+  "publishing arrives later" placeholder text.
+- **Published-quiz immutability required zero new code** — every question
+  mutation already checked `loadOwnedDraftQuiz`'s draft-status gate, and
+  every question RPC already independently re-checked `status = 'draft'`
+  inside the SQL function. Publishing a quiz makes all of them reject
+  automatically, verified directly (see below) rather than assumed.
+
+**Real end-to-end verification performed (not just code review):**
+
+- **Gemini generation was unavailable this session** (sustained `503
+  UNAVAILABLE` "high demand" from the real API, confirmed with a direct
+  isolated test call before deciding this) — questions were seeded
+  through the real, authenticated `add_quiz_question` RPC instead (same
+  validated code path manual "Add question" uses), consistent with the
+  approach already used in the bulk-approval work. A test-setup mistake
+  during this (creating a quiz via the UI form with a non-zero
+  MC/TF target and *then* calling the increment-based `add_quiz_question`
+  on top of it) produced a real, useful negative test: the quiz's
+  configured counts (8 total) no longer matched its actual question rows
+  (4), and the real `publishQuiz` action correctly rejected publishing
+  with "The quiz's questions don't match its configured composition" —
+  proving that check is live. The corrected seeding pattern (insert the
+  quiz row at 0/0/0, then add exactly the intended questions) was used for
+  the rest of the tests.
+- **Through a real browser**: created a quiz (2 MC + 2 TF, 20-minute
+  limit, a 24-hour deadline), seeded 4 matching questions, confirmed the
+  Publish button was hidden while questions were pending, approved all 4
+  via the real Phase 5 bulk-approve UI ("Ready for publishing" appeared),
+  confirmed the Publish button then appeared, clicked it, saw the exact
+  specified confirmation copy, confirmed, and the quiz became `published`
+  with a real access token and a working "Student access link" box (copy
+  button showed "Copied").
+- **Immutability, as the owning teacher directly at the RPC layer (not
+  just via the UI, and not just a different teacher)**: after publishing,
+  `add_quiz_question`, `update_quiz_question`, `delete_quiz_question`, and
+  `reorder_quiz_questions` were called directly against the published
+  quiz by its own real owning teacher — all four failed with "Only draft
+  quizzes can be edited." Direct navigation to the `/edit` and `/review`
+  pages on the published quiz both redirected away. Re-read the quiz and
+  every question afterward: completely unchanged.
+- **Publish-rejected-while-pending**: a separate quiz with one approved
+  and one still-pending question correctly hid the Publish button; direct
+  DB read confirmed it stayed `draft`, unpublished, with no `access_code`.
+- **Security**: a second real teacher account got a real `404` on the
+  first teacher's published quiz page; a direct attempt to flip its
+  `status` to `'published'`/overwrite its `access_code` via PostgREST
+  matched 0 rows (RLS); a direct `delete_quiz_question` call against the
+  first teacher's question failed on ownership.
+- **No secret leakage**: re-checked a fresh production build's
+  `.next/static` for `SUPABASE_SECRET_KEY` and `GEMINI_API_KEY` — zero
+  matches.
+- **Cleanup**: deleted both temporary teacher accounts (cascading to their
+  quizzes/questions/answers) via the Admin API. Confirmed the database
+  contains only the one pre-existing real account and its own quiz. All
+  temporary scripts and the temporary `pdfkit`/`playwright` dev tools were
+  removed — neither was added to `package.json`.
+
+**Validation:** `npx tsc --noEmit`, `npm run lint`, `npm run build`, and
+`npm run lint:sql` (all 6 existing migrations — none added this phase)
+all clean.
+
+**Not implemented — explicitly deferred pending the service_role
+decision above:** `/join/[token]` public route, student identity
+collection, participant creation, quiz_session creation, deadline
+enforcement against real student session starts. None of this is
+documented as done anywhere else in these docs.

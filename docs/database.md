@@ -11,7 +11,14 @@ function — no `quizzes`/`questions`/`answers` table/column changes; the
 new Postgres functions for atomic question add/edit/delete/reorder — no
 new tables, and `quizzes.status`'s check constraint is untouched ("ready
 for publishing" is computed, never persisted — see architecture.md).
-SQL migrations live under `supabase/migrations/`:
+Phase 6 (publishing) required **no schema change at all** —
+`quizzes.status`'s existing `'published'` value, `published_at`, `ends_at`
+(the deadline), and `access_code` (reused as the opaque student token)
+were all added back in Phase 1 and sat unused until now. Phase 6's
+student-facing half (`/join/{token}`, participants, quiz_sessions) is
+**not implemented** — blocked on a `service_role` grant decision, see
+"service_role privileges" below. SQL migrations live under
+`supabase/migrations/`:
 
 - `20260829120000_create_core_schema.sql` — tables, indexes, constraints,
   triggers.
@@ -65,7 +72,7 @@ Supabase directly from the browser, so there is nothing for `anon` to need.
 RLS itself, its 17 policies, and every ownership rule are unchanged by this
 migration; it only unblocks the access those policies already described.
 
-### `service_role` has the same gap — discovered in Phase 5, not yet fixed
+### `service_role` privileges — discovered in Phase 5, re-verified and scoped in Phase 6, still not fixed
 
 While writing Phase 5's test/verification scripts, a direct
 `admin.from("questions").select(...)` call (using the `SUPABASE_SECRET_KEY`
@@ -77,27 +84,61 @@ service_role`. Verified directly: `service_role` has `rolbypassrls = true`
 project's "no auto-grant" behavior (see above) apparently applies to
 `service_role` too, not just `anon`/`authenticated`.
 
-This has never surfaced as a bug because no phase through Phase 4 ever
-calls `.from()` on a `public.*` table with the admin client — Phase 1–4's
+This has never surfaced as a bug because no phase through Phase 5 ever
+calls `.from()` on a `public.*` table with the admin client — Phase 1–5's
 admin-client usage is entirely `auth.admin.*` (user management) and
 `storage.*` (bucket objects), neither of which is gated by these table
 grants. Phase 5's test scripts hit it purely as a verification convenience
 and were rewritten to use the real authenticated teacher client instead
 (which already has the grants it needs).
 
-**This is a real latent gap for a future phase**, though: Phase 1's RLS
-design (see the comment atop `20260829120100_enable_rls.sql`) already
-commits to the service-role admin client (`src/lib/supabase/admin.ts`)
-being how all student-facing writes to `participants`/`quiz_sessions`/
-`responses` happen (Phase 7+, not built yet) — and today, `service_role`
-has no grant to write to any of them either. Whoever builds that phase will
-need a `grant ... to service_role` migration for exactly those three
-tables (and nothing more — `service_role` should still not need
-`quizzes`/`questions`/`answers` writes for anything currently planned).
-Documented here rather than fixed now, since Phase 5 itself never needed
-it and a schema/grant change outside the current phase's actual
-requirement is exactly what "don't touch unless absolutely required for
-this phase" is meant to prevent.
+**Phase 6 was explicitly required to re-verify this before building
+student-facing participant/session creation, and to STOP rather than
+build that functionality (or apply a grant) if the privileges were
+missing.** Re-ran the exact same live check
+(`information_schema.role_table_grants` filtered to `grantee =
+'service_role'`) — still zero `SELECT`/`INSERT`/`UPDATE`/`DELETE` grants
+on any table, confirmed unchanged. Per that instruction, the public
+`/join/{token}` route and participant/session creation were **not
+built** in Phase 6 — see [architecture.md](./architecture.md) → "Student
+access — blocked pending a service_role grant decision".
+
+**Current privileges (`service_role`, every table):** `REFERENCES`,
+`TRIGGER`, `TRUNCATE` only.
+
+**Required privileges for the student flow Phase 7 will build**, scoped
+to exactly what that flow needs and nothing more:
+
+| Table | Grant needed | Why |
+|---|---|---|
+| `quizzes` | `SELECT` | The public join page has no Supabase session (no `authenticated` role) — reading a quiz by `access_code`, checking `status = 'published'` and the deadline, and showing its composition/time limit can only happen through the service-role client. |
+| `participants` | `SELECT`, `INSERT` | Create the student's participant row; `SELECT` is needed for PostgREST to return the inserted row (`.select()` after `.insert()`). |
+| `quiz_sessions` | `SELECT`, `INSERT` | Create the session row referencing the quiz + participant; same `.select()`-after-`.insert()` reasoning. |
+
+**Deliberately NOT proposed yet:** `UPDATE` on `participants`/
+`quiz_sessions` (nothing in the planned student-join flow updates either
+after creation) and anything on `responses`/`questions`/`answers`
+(Phase 6/7's join flow doesn't touch responses at all — that's the actual
+quiz-taking phase). Granting ahead of actual need is exactly what "do not
+blindly grant permissions" rules out; the table above should be revisited
+and extended (not re-derived from scratch) when the phase that needs
+`responses`/session updates is actually built.
+
+**Proposed minimal migration (NOT applied — pending an explicit decision):**
+
+```sql
+grant select on public.quizzes to service_role;
+grant select, insert on public.participants to service_role;
+grant select, insert on public.quiz_sessions to service_role;
+```
+
+This does not touch RLS at all — `service_role` already has
+`rolbypassrls = true`, so once granted, no policy changes are needed or
+proposed. It also does not touch `anon`'s or `authenticated`'s grants,
+and does not add a new RLS policy anywhere (an `anon`-facing `SELECT`
+policy on `quizzes` was considered and rejected as the wrong shape for
+this project — see architecture.md — since it would create public
+enumeration surface a service-role-only read does not).
 
 ## Principles
 
@@ -652,3 +693,71 @@ not just HMR) using two temporary teacher accounts and a real Gemini call:
   resolved the same way). Confirmed afterward: `auth.users` and `quizzes`
   contain only the one pre-existing real account and its own quiz; the
   `quiz-pdfs` bucket is empty for both temporary teacher ids.
+
+## Live verification — Phase 6 quiz publishing (2026-08-29)
+
+No migration this phase (see the status header above) — verification
+focused on the publish action's authoritative server-side checks, the
+access token, published-quiz immutability, and the `service_role`
+privilege re-check, using two temporary teacher accounts.
+
+- **`service_role` re-confirmed empty**: `information_schema.
+  role_table_grants` for `grantee = 'service_role'` returned zero
+  `SELECT`/`INSERT`/`UPDATE`/`DELETE` rows across every `public` table —
+  same result as Phase 5's discovery, re-run fresh for Phase 6 as
+  explicitly required before any student-facing code was written. See
+  "service_role privileges" above for the proposed (not applied) grant.
+- **Publish rejected on composition mismatch, for real**: a test quiz was
+  (correctly, deliberately) seeded in a way that made
+  `questions.length` (4) not match `quizzes.total_questions` (8) — the
+  real `publishQuiz` action rejected it with "The quiz's questions don't
+  match its configured composition," proving the composition check is
+  live, not just present in the code. (This state came from a test-setup
+  mistake — creating a quiz via the form with a non-zero target and then
+  calling `add_quiz_question`, which increments from the existing count —
+  not a product bug; the correct seeding pattern inserts the quiz at
+  0/0/0 first.)
+- **Publish accepted once genuinely ready**: a quiz correctly seeded at
+  2 MC + 2 TF (4 real rows, `quizzes.multiple_choice_count/
+  true_false_count/total_questions` all matching), all 4 approved via the
+  real Phase 5 bulk-approve UI, published successfully through the real
+  "Publish" button + confirmation dialog. `status` became `published`,
+  `published_at` was set, and a real `access_code` was generated and
+  persisted.
+- **Access token verified opaque**: the generated token
+  (`Cnoy5hCLgGHJUgrSh1L6Aj2rjp9M_-HQ`, 32 base64url characters) is neither
+  the quiz's UUID nor derived from it, and was shown in a real "Student
+  access link" box with a working "Copy link" button (clipboard
+  permissions granted in the test browser context; button showed "Copied"
+  feedback).
+- **Published-quiz immutability, both through the UI and directly at the
+  RPC layer, as the quiz's own owning teacher (not just a different
+  teacher)**: direct navigation to `/quizzes/[id]/edit` and
+  `/quizzes/[id]/review` on the published quiz both redirected away (no
+  new code — the existing `status !== 'draft'` guards already in those
+  pages did this). Calling `add_quiz_question`, `update_quiz_question`,
+  `delete_quiz_question`, and `reorder_quiz_questions` directly (bypassing
+  the UI entirely) as the actual owning teacher against the published
+  quiz's own questions all failed with `"Only draft quizzes can be
+  edited."` — the RPCs' own internal status check, unrelated to who's
+  calling. Re-read the quiz and its questions afterward: title, status,
+  `access_code`, and every question's text were byte-for-byte unchanged.
+- **Cross-tenant**: a second real teacher account got a real `404` loading
+  the published quiz's detail page; a direct attempt to flip its `status`
+  to `'published'` (redundant, but also attempting to overwrite
+  `access_code`) via PostgREST matched 0 rows (RLS `quizzes_update_own`);
+  a direct `delete_quiz_question` call against the first teacher's
+  question failed on ownership, independent of publish status.
+- **Deadline and duration reused, not redesigned**: the test quiz was
+  created with `duration_minutes = 20` and `ends_at` 24 hours out (via a
+  direct authenticated insert, not a new form — the existing quiz
+  create/edit form already collects both since Phase 3); both rendered
+  correctly on the quiz detail page ("Time limit: 20 minutes",
+  "Deadline: <formatted date>").
+- **No secret leakage**: re-checked a fresh production build's
+  `.next/static` for both `SUPABASE_SECRET_KEY` and `GEMINI_API_KEY` —
+  zero matches.
+- **Cleanup**: deleted both temporary teacher accounts (cascading to their
+  quizzes/questions/answers) via the Admin API. Confirmed afterward:
+  `auth.users` and `quizzes` contain only the one pre-existing real
+  account and its own quiz.

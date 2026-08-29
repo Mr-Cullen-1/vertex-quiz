@@ -95,20 +95,37 @@ draft (metadata only, Phase 3)
   │  upload PDF → Gemini extraction → validate → save (Phase 4)
   ▼
 draft with questions (pending review)
-  │  teacher approves/edits/adds/deletes/reorders questions (Phase 5, this)
+  │  teacher approves/edits/adds/deletes/reorders questions (Phase 5)
   ▼
 draft, all questions approved → "ready for publishing" (computed, not persisted)
-  │
-  └─(Phase 6)─> teacher publishes ──────────────────> published ──> closed
+  │  teacher explicitly clicks Publish (Phase 6, this — server-side re-verified)
+  ▼
+published ── student access via /join/{access_code} (Phase 7 — blocked, see below) ──> closed
 ```
 
 "Ready for publishing" is intentionally **not** a `quizzes.status` value —
-it's computed on the review page from
+it's computed (both on the review page and the quiz detail page) from
 `count(questions.review_status = 'approved') = count(questions.*) > 0`.
-`quizzes.status` stays `'draft'` for the entire review process; nothing in
-Phase 5 writes `published` or touches the `status` check constraint. This
-keeps the non-negotiable product rule intact: only an explicit, future
-Phase 6 publish action can ever move a quiz out of draft.
+That computed value only ever gates whether the *button* is shown; the
+actual publish Server Action (`publishQuiz`, Phase 6) independently
+re-derives every condition from the database before writing anything — see
+"Publishing" below.
+
+**Phase 6 status: publishing is fully implemented; student access is
+not.** The teacher-facing half (readiness check, the `publishQuiz` action,
+the access-token/join-URL, and published-quiz immutability) is built and
+verified end-to-end. The public `/join/{token}` route and participant/
+session creation are **not implemented** — they're blocked on a real,
+verified gap: `service_role` currently has no table grants on this
+project (confirmed live, same class of issue as the Phase 2
+`authenticated` gotcha), and the student flow's server-side code has no
+other legitimate way to read a quiz or write a participant/session without
+either that grant or a new anon-facing RLS policy — both of which are
+schema/security changes the task's own instructions say must stop for
+review rather than be applied unilaterally. See "Student access — blocked
+pending a service_role grant decision" below and
+[database.md](./database.md) → "service_role privileges" for the full
+finding.
 
 Phase 3 implements quiz metadata: a teacher creates a `quizzes` row with a
 title, optional description, a fixed `multiple_choice_count` /
@@ -123,14 +140,15 @@ and is additionally backstopped by the `quizzes_question_counts_match`
 
 A draft can be edited or deleted (`src/lib/quizzes/actions.ts`) — both
 operations first re-read the row through the RLS-scoped client and refuse
-if `status !== 'draft'`, so once Phase 6 introduces publishing, a published
-quiz automatically becomes un-editable/un-deletable through this code path
-without any additional change. Ownership is enforced twice: RLS
-(`quizzes_insert_own`/`update_own`/`delete_own`, all `teacher_id =
-auth.uid()`) is the actual boundary, and the Server Actions additionally
-re-check status/existence themselves so a rejected write surfaces a
-specific message ("Quiz not found." / "Only draft quizzes can be edited.")
-instead of a generic Postgres error.
+if `status !== 'draft'`. This is exactly why Phase 6 needed **zero** new
+immutability code: a published quiz already became un-editable/
+un-deletable through this same code path the moment `publishQuiz` set
+`status = 'published'`, verified directly (see "Publishing" below).
+Ownership is enforced twice: RLS (`quizzes_insert_own`/`update_own`/
+`delete_own`, all `teacher_id = auth.uid()`) is the actual boundary, and
+the Server Actions additionally re-check status/existence themselves so a
+rejected write surfaces a specific message ("Quiz not found." / "Only
+draft quizzes can be edited.") instead of a generic Postgres error.
 
 Phase 4 fills in `questions`/`answers`: the teacher uploads a PDF, it's
 stored privately, sent to Gemini, and the validated result is saved as one
@@ -275,6 +293,95 @@ apply) and explicitly `grant execute ... to authenticated` — new routines
 are never auto-granted on this project (see docs/database.md "Table
 privileges"), same lesson as Phase 2 and Phase 4.
 
+## Publishing (Phase 6)
+
+```
+src/lib/quizzes/publish-actions.ts: publishQuiz(quizId)
+  → requireSession + loadOwnedDraftQuiz (same shared helpers every other
+    question/quiz action uses — ownership + "is this a draft?" check)
+  → re-fetches every question + its answers, independently re-derives:
+      • at least 1 question exists
+      • every question.review_status === 'approved'
+      • actual MC/TF/total counts match quizzes.multiple_choice_count/
+        true_false_count/total_questions
+      • every question still passes validateQuestionShape (the same
+        authority every write path already goes through)
+  → generateAccessToken() (24 random bytes, base64url — src/lib/quizzes/
+    access-token.ts) written to quizzes.access_code
+  → single UPDATE: status='published', published_at=now(), access_code=<token>
+```
+
+**No schema change.** `quizzes.status` already supported `'published'`,
+`published_at` and `ends_at` (the deadline) already existed, and
+`access_code` — added in Phase 1 with exactly this future use already
+anticipated (`unique`, nullable, "assigned on publish") — is reused
+directly as the opaque student-facing token. `duration_minutes` (already
+teacher-configurable since Phase 3) is reused as-is for the session time
+limit; Phase 6 stores it, nothing more — the countdown itself is Phase 7.
+
+**"Ready" is a UI hint, never the authority.** The quiz detail page shows
+the "Publish" button only when its own quick check (`reviewedCount ===
+questionCount > 0`) passes, but `publishQuiz` re-verifies everything above
+independently — a stale or manipulated client can't publish a quiz that
+doesn't actually qualify.
+
+**Access token.** `generateAccessToken()` is `crypto.randomBytes(24)`
+base64url-encoded — 32 URL-safe characters, ~192 bits of entropy. Never
+the quiz's UUID, never sequential, never derived from the title or a
+timestamp — the token carries no information, so guessing or enumerating
+one is infeasible. On the astronomically unlikely event of a collision
+with `quizzes.access_code`'s `unique` constraint, `publishQuiz` retries
+with a fresh token up to 3 times before giving up with a clear error.
+
+**Published-quiz immutability required zero new code.** Every question
+mutation (`addQuestion`, `updateQuestion`, `deleteQuestion`,
+`reorderQuestions`, `setQuestionReviewStatus`, the bulk-approve actions)
+already called `loadOwnedDraftQuiz` before touching anything, and every
+question RPC (`add_quiz_question`, `update_quiz_question`,
+`delete_quiz_question`, `reorder_quiz_questions`) already independently
+re-checked `status = 'draft'` inside the SQL function itself. The moment
+`publishQuiz` flips `status` to `'published'`, both layers reject every
+one of those operations automatically — verified directly, including as
+the quiz's own owning teacher calling the RPCs straight (not just through
+the UI), not only as a different, non-owning teacher. `quizFormSchema`'s
+edit page and `deleteQuiz` (Phase 3) already had the same `status !==
+'draft'` guard for the quiz row itself, so nothing there needed touching
+either. No Phase 6 code introduces a new immutability check — it
+consistently inherited the one every prior phase already built.
+
+**Do not confuse `access_code` with a `quiz_sessions.session_token`.**
+`quizzes.access_code` is the public, shareable, long-lived join link for
+the *quiz* (one per published quiz). A future Phase 7 `quiz_sessions`
+session identifier would be a *different*, per-participant, single-use
+value — the two must never be conflated or interchanged.
+
+## Student access — blocked pending a service_role grant decision
+
+Phase 6's task explicitly required verifying `service_role`'s real table
+privileges *before* building student-facing participant/session creation,
+and explicitly required stopping — not silently granting anything — if
+they were insufficient. They are: confirmed live (`information_schema.
+role_table_grants`) that `service_role` has only `REFERENCES`/`TRIGGER`/
+`TRUNCATE` on every `public` table — no `SELECT`/`INSERT`/`UPDATE` on
+`quizzes`, `participants`, or `quiz_sessions`. This is the same "no
+auto-grant on this project" characteristic Phase 2 found for
+`authenticated` (see database.md → "Table privileges"), just never
+exercised by `service_role` before now, since Phase 1–5's admin-client
+usage (`auth.admin.*`, Storage) isn't gated by these table grants at all.
+
+Concretely, this blocks the entire public `/join/{token}` route: a
+student's browser has no Supabase session (no `authenticated` role), so
+the only way to read a quiz by its `access_code` or write a `participants`/
+`quiz_sessions` row server-side is the service-role admin client — and it
+currently can't do either. Building `/join/{token}` today would mean
+either (a) applying a `service_role` grant migration, or (b) adding a new
+`anon`-facing RLS policy on `quizzes` — both are exactly the kind of
+schema/RLS change this task's instructions require stopping for. Neither
+was applied. See [database.md](./database.md) → "service_role privileges"
+for the proposed minimal grant (not yet applied) and the full reasoning
+for why option (a) — not a new anon RLS policy — is the right shape when
+this is approved.
+
 **"Ready for publishing" is computed, never persisted** — see "Quiz
 lifecycle" above.
 
@@ -365,12 +472,14 @@ src/
           edit/                 Phase 3 — edit-quiz form (pre-filled)
           review/                 Phase 5 — question review/edit/add/delete/reorder
             _components/            question-list/-card.tsx, question-editor-dialog.tsx, add-question-button.tsx
-          _components/          delete-quiz-button.tsx, pdf-generation-panel.tsx (Phase 4)
+          _components/          delete-quiz-button.tsx, pdf-generation-panel.tsx (Phase 4),
+                                 publish-quiz-button.tsx, student-access-link.tsx (Phase 6)
         _components/          quiz-form.tsx — shared create/edit form
       results/              Empty-state shell, Phase 9/10 fill it in
       settings/             Read-only account info (real profile data)
       _components/          Sidebar, Header, StatCard, mobile nav (Sheet-based)
-    (student)/join/[code]/ Phase 7+
+    (student)/join/[token]/ Phase 7+ — blocked on a service_role grant
+                             decision, see "Student access" above
   components/
     ui/                   shadcn/ui primitives
   lib/
@@ -387,6 +496,8 @@ src/
       question-rules.ts           Phase 5 — validateQuestionShape, shared with gemini/validate.ts
       question-schema.ts           Phase 5 — Zod shape for manual question input
       question-actions.ts           Phase 5 — add/update/delete/reorder/setReviewStatus
+      access-token.ts                Phase 6 — generateAccessToken() (crypto.randomBytes)
+      publish-actions.ts              Phase 6 — publishQuiz
     gemini/
       client.ts               Phase 4 — server-only GoogleGenAI client
       prompt.ts                Phase 4 — extraction prompt builder

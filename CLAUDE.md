@@ -168,7 +168,20 @@ gotcha as the one below but for the admin client. Details:
 [docs/database.md](./docs/database.md) → "Question management RPCs" and
 "Table privileges".
 
-Full verification logs (Phase 1–4):
+**Phase 6 — no schema change.** `quizzes.status`'s `'published'` value,
+`published_at`, `ends_at` (deadline), and `access_code` (reused as the
+opaque student join token) all already existed from Phase 1. Published-
+quiz immutability needed zero new code — every question mutation/RPC
+already gated on `status = 'draft'`. **`service_role` re-verified still
+has no grants** (re-checked live, as this phase's instructions explicitly
+required before building student-facing code) — this is what's blocking
+`/join/{token}`/participants/quiz_sessions from being built yet. A
+minimal, NOT-yet-applied grant is proposed in
+[docs/database.md](./docs/database.md) → "service_role privileges";
+apply it (or decide on an alternative) before starting that part of
+Phase 7.
+
+Full verification logs (Phase 1–6):
 [docs/development-progress.md](./docs/development-progress.md).
 
 ## 7. Development rules
@@ -264,20 +277,25 @@ confirmation to continue.
 | 3 | Create Quiz and PDF upload | ✅ Done — PDF upload landed as part of Phase 4 |
 | 4 | Gemini AI extraction | ✅ Done — verified end-to-end with a real PDF and a real Gemini call |
 | 5 | Question review and editor | ✅ Done — approve/edit/add/delete/reorder, verified end-to-end |
-| 6 | Quiz settings and publishing | ⏳ Next |
-| 7 | Student entry and session | Not started |
+| 6 | Quiz settings and publishing | ⚠️ Partial — publishing done; student access blocked on a `service_role` grant decision |
+| 7 | Student entry and session | ⏳ Next — needs the Phase 6 `service_role` grant decision resolved first |
 | 8 | Student quiz experience | Not started |
 | 9 | Results | Not started |
 | 10 | Analytics | Not started |
 | 11 | Final MVP polish | Not started |
 
-**Current phase:** 5 (Question review and editor) — complete. A teacher
-can review every question on a draft quiz — AI-generated or manually
-added — approve/edit/delete/reorder it, and see "ready for publishing"
-once every question is approved (a computed state, not a persisted one).
-Nothing publishes automatically; the quiz stays `draft` throughout.
-Verified with a real Gemini-generated batch, real manual add/edit/delete/
-reorder through the browser, and a real cross-tenant RPC/RLS security
-test. **Next phase:** 6 — Quiz settings and publishing.
+**Current phase:** 6 (Quiz settings and publishing) — **partially
+complete**. A teacher can publish a ready quiz (every question approved,
+composition verified server-side) via an explicit confirm dialog; the
+quiz becomes `published`, immutable (verified directly, including as the
+owning teacher hitting the question RPCs straight), and gets a real
+opaque access token shown as a copyable student link. **Student access is
+not built**: `service_role` has no table grants on this project (verified
+live), so the public `/join/{token}` route, participant creation, and
+quiz_session creation have no way to read a quiz or write those tables
+server-side yet. A minimal grant is proposed but not applied — see
+[docs/database.md](./docs/database.md) → "service_role privileges".
+**Next:** resolve that grant decision, then continue Phase 7 — Student
+entry and session.
 
 Live status detail: [docs/development-progress.md](./docs/development-progress.md).

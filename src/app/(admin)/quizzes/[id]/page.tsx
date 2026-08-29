@@ -6,8 +6,11 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/server";
 import { assertNoError } from "@/lib/supabase/assert-no-error";
+import { getEnv } from "@/lib/env";
 import { DeleteQuizButton } from "./_components/delete-quiz-button";
 import { PdfGenerationPanel } from "./_components/pdf-generation-panel";
+import { PublishQuizButton } from "./_components/publish-quiz-button";
+import { StudentAccessLink } from "./_components/student-access-link";
 
 type QuizDetail = {
   id: string;
@@ -20,6 +23,8 @@ type QuizDetail = {
   duration_minutes: number | null;
   ends_at: string | null;
   created_at: string;
+  published_at: string | null;
+  access_code: string | null;
   source_pdf_path: string | null;
 };
 
@@ -62,7 +67,7 @@ export default async function QuizDetailPage(
   const { data: quiz, error } = await supabase
     .from("quizzes")
     .select(
-      "id, title, description, status, multiple_choice_count, true_false_count, total_questions, duration_minutes, ends_at, created_at, source_pdf_path"
+      "id, title, description, status, multiple_choice_count, true_false_count, total_questions, duration_minutes, ends_at, created_at, published_at, access_code, source_pdf_path"
     )
     .eq("id", id)
     .maybeSingle()
@@ -94,6 +99,14 @@ export default async function QuizDetailPage(
 
   assertNoError(reviewedCountError, "Failed to load review progress");
 
+  const readyForPublishing =
+    isDraft && (questionCount ?? 0) > 0 && reviewedCount === questionCount;
+
+  const joinUrl =
+    quiz.status === "published" && quiz.access_code
+      ? `${getEnv().NEXT_PUBLIC_APP_URL}/join/${quiz.access_code}`
+      : null;
+
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -123,6 +136,7 @@ export default async function QuizDetailPage(
               Edit
             </Button>
             <DeleteQuizButton quizId={quiz.id} quizTitle={quiz.title} />
+            {readyForPublishing ? <PublishQuizButton quizId={quiz.id} /> : null}
           </div>
         ) : null}
       </div>
@@ -167,6 +181,14 @@ export default async function QuizDetailPage(
               {formatDateTime(quiz.created_at)}
             </dd>
           </div>
+          {quiz.published_at ? (
+            <div>
+              <dt className="text-sm text-muted-foreground">Published</dt>
+              <dd className="text-sm font-medium text-foreground">
+                {formatDateTime(quiz.published_at)}
+              </dd>
+            </div>
+          ) : null}
         </dl>
       </div>
 
@@ -201,12 +223,15 @@ export default async function QuizDetailPage(
         </div>
       ) : null}
 
-      {isDraft ? (
+      {isDraft && !readyForPublishing ? (
         <p className="text-sm text-muted-foreground">
-          Publishing arrives in a later phase — for now this quiz stays a
-          draft you can keep editing.
+          {(questionCount ?? 0) === 0
+            ? "Add and approve questions to enable publishing."
+            : "Approve every question above to enable publishing."}
         </p>
       ) : null}
+
+      {joinUrl ? <StudentAccessLink joinUrl={joinUrl} /> : null}
     </div>
   );
 }
