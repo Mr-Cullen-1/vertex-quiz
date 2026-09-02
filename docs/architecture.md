@@ -44,10 +44,13 @@ system of record besides Gemini.
 - `app/(student)/join/[token]/...` — public student flow: validate the
   quiz's access token, show quiz info, collect first/last name, create a
   participant + quiz_session. No authentication; identity is the
-  `quiz_sessions.session_token` created on entry. Added in Phase 6 (the
-  actual question-answering UI at `app/(student)/quiz/[sessionToken]/` is
-  a placeholder — Phase 7 builds the real interface there). See "Student
-  access" below.
+  `quiz_sessions.session_token` created on entry. Added in Phase 6. See
+  "Student access" below.
+- `app/(student)/quiz/[sessionToken]/...` — the real student quiz player:
+  randomized question/answer order, answer selection and persistence, a
+  server-enforced countdown, and final submit. No authentication here
+  either; identity is the same opaque `session_token`. Added in Phase 7 —
+  see "Student quiz player" below.
 - `app/page.tsx` — minimal public landing/status page (Phase 0).
 
 Route protection uses the Next.js 16 `proxy.ts` convention (exported
@@ -109,6 +112,13 @@ draft, all questions approved → "ready for publishing" (computed, not persiste
 published ── student joins via /join/{access_code}, gets a session (Phase 6) ──> closed
 ```
 
+A student's own `quiz_sessions.status` progresses independently of the
+quiz's `status` (which stays `published` throughout): `started` (Phase 6,
+on join) → `in_progress` (Phase 7, once the session's question order is
+generated) → `completed` (Phase 7, on submit) or `expired` (Phase 7, if
+`expires_at` passes before the student submits) — see "Student quiz
+player" below.
+
 "Ready for publishing" is intentionally **not** a `quizzes.status` value —
 it's computed (both on the review page and the quiz detail page) from
 `count(questions.review_status = 'approved') = count(questions.*) > 0`.
@@ -127,6 +137,15 @@ pass, reported rather than silently fixed, then applied after explicit
 approval. See "Student access" below and [database.md](./database.md) →
 "service_role privileges" for the full finding and the exact grant
 applied.
+
+**Phase 7 status: complete.** The real student quiz player replaces the
+Phase 6 placeholder at `/quiz/[sessionToken]`: randomized, per-session-
+stable question/answer order; answer selection with change-before-submit;
+a server-enforced countdown; and final submit. It needed its own scoped
+`service_role` grant, found and applied the same way as Phase 6's — see
+"Student quiz player" below and [database.md](./database.md) →
+"service_role privileges". No scoring, results, or analytics — those are
+Phase 8+.
 
 Phase 3 implements quiz metadata: a teacher creates a `quizzes` row with a
 title, optional description, a fixed `multiple_choice_count` /
@@ -352,9 +371,10 @@ consistently inherited the one every prior phase already built.
 
 **Do not confuse `access_code` with a `quiz_sessions.session_token`.**
 `quizzes.access_code` is the public, shareable, long-lived join link for
-the *quiz* (one per published quiz). A future Phase 7 `quiz_sessions`
-session identifier would be a *different*, per-participant, single-use
-value — the two must never be conflated or interchanged.
+the *quiz* (one per published quiz). `quiz_sessions.session_token` (Phase
+6 creates it, Phase 7 is what actually uses it beyond a placeholder) is a
+*different*, per-participant, single-use value — the two are never
+conflated or interchanged.
 
 ## Student access (Phase 6)
 
@@ -436,15 +456,113 @@ carries only the session's `session_token`. Neither `quizzes.id`,
 `participants.id`, `quiz_sessions.id`, nor the teacher's id ever appears
 in a URL, a form field, or rendered text on either student-facing page.
 
-**`/quiz/[sessionToken]` is a placeholder, not Phase 7.** It looks up the
-session by `session_token` (service-role client, same reasoning as
-above), shows the participant's first name and the quiz title, and
-explicitly says the quiz itself opens in a future update — no question
-data, no timer, no navigation. This is the literal continuation point
-Phase 7 will build the real quiz-taking UI at.
-
 **"Ready for publishing" is computed, never persisted** — see "Quiz
 lifecycle" above.
+
+## Student quiz player (Phase 7)
+
+**Unblocked by its own scoped `service_role` grant**, found and applied
+the same way as Phase 6's: re-checked live (still zero grants on
+`questions`/`answers`/`responses`, no `UPDATE` anywhere) before writing
+any code, then a minimal migration —
+
+```sql
+grant select on public.questions to service_role;
+grant select on public.answers to service_role;
+grant update on public.quiz_sessions to service_role;
+grant select, insert, update on public.responses to service_role;
+```
+
+— applied via `20260902120000_grant_student_quiz_player_privileges.sql`
+and verified live: exactly those grants, nothing more, `anon` unchanged.
+Full detail: [database.md](./database.md) → "service_role privileges".
+
+```
+Student opens /quiz/{session_token}
+  → src/lib/student/quiz-session.ts: loadPlayableSession(token)
+      admin client: SELECT quiz_sessions WHERE session_token = token,
+      joined to quizzes(title, status) and participants(first_name)
+      → no row, or quiz status != 'published' → "not_found"
+      → status == 'completed' → "completed"
+      → expires_at <= now() → lazily mark status='expired' → "expired"
+      → otherwise "active":
+          question_order empty? generate a Fisher-Yates shuffle of this
+          quiz's question ids, and of each question's answer ids, and
+          persist it onto quiz_sessions.question_order (compare-and-swap
+          on `status` so two racing loads can't disagree) — status also
+          moves started -> in_progress here
+          load questions/answers in that persisted order, load this
+          session's existing responses to pre-fill selections
+          → return questions/answers (never is_correct) + expiresAt
+  → renders <QuizPlayer>: progress, timer, MC/TF options, prev/next,
+    a numbered question-jump row, and Submit on the last question
+  → selecting an option: src/lib/student/response-actions.ts submitAnswer()
+      re-derive session from token; reject if completed or expires_at
+      has passed (lazily marking expired); confirm questionId is one of
+      this session's own shuffled questions; confirm answerId genuinely
+      belongs to questionId via a fresh answers lookup; compute
+      is_correct from that lookup (never from the client); upsert one
+      responses row on (session_id, question_id)
+  → Submit (confirm dialog) → submitQuiz(): idempotent if already
+      completed; rejects if expired; otherwise status='completed',
+      completed_at=now() — no score is computed or persisted
+```
+
+**Randomization is persisted, not just seeded.** `quiz_sessions.
+question_order` (a Phase 1 column, unused until now) stores a jsonb
+`{ questions: uuid[], answers: { [questionId]: uuid[] } }` — display order
+only; which `answers` row is actually correct never changes. Every load
+after the first reads this persisted value, which is what makes "the same
+session always sees the same order" hold across refreshes — a
+deterministic hash-of-token shuffle was considered (and would have been
+the right call if persistence weren't available) but a real random
+shuffle plus the column Phase 1 already provisioned for this purpose was
+the smaller, more direct solution.
+
+**`is_correct` is computed server-side, from the database, on every
+write — never from the client, and never sent to the client.**
+`submitAnswer` looks up the real `answers` row for the client-claimed
+`answerId` itself; the response it returns to the browser never includes
+`is_correct` for any answer, correct or not. `loadPlayableSession`'s
+question/answer shapes likewise never carry `is_correct`.
+
+**Every relationship is re-verified on every write, not cached from the
+session's own shuffle.** `submitAnswer` confirms `questionId` is one of
+this session's own persisted question ids, and separately confirms
+`answerId` belongs to that exact `questionId` via a fresh `answers`
+lookup — an answer for a different question in the same quiz, or a
+question from an entirely different quiz, is rejected either way, and
+this was verified directly, not just reasoned about.
+
+**Expiry has two distinct terminal states, and `expires_at` — not
+`status` — is the only real authority.** A session that runs out of time
+without ever submitting is `expired`; a session the student explicitly
+submits (whether or not the clock was close to running out) is
+`completed`. `submitQuiz` refuses to complete an already-expired session,
+so a slow request can't sneak a late submission past the deadline; every
+`submitAnswer` call independently re-checks `expires_at` too, so the
+client's own countdown display is never the actual enforcement — it can
+lag or drift and the server still rejects the write. Both `quiz-
+session.ts` and `response-actions.ts` share one `isSessionExpired()`/
+`markSessionExpired()` helper (`src/lib/student/expiry.ts`) so this check
+and its "lazily record the expired status" side effect can't drift apart
+between the read path and the write path.
+
+**The timer display is a refinement, not the enforcement.** `QuizPlayer`
+corrects for client/server clock skew using one server timestamp sampled
+when the session loaded, then ticks down client-side — purely for what
+the student sees; the real check is always the server's own `expires_at`
+comparison on the next write. This codebase's React Compiler lint rules
+forbid calling `Date.now()` during render (including inside `useMemo`),
+so every impure timer read lives inside a `useEffect`, and "has time run
+out" is a value derived from the ticking countdown rather than a second
+piece of state a separate effect sets — two real lint errors here were
+fixed, not suppressed, during Phase 7 (see development-progress.md).
+
+**No new database identifiers are exposed to the student here either.**
+The player receives question/answer ids (needed to know what to submit)
+but never a quiz id, a teacher id, or the raw `quiz_sessions.id` — only
+the opaque `session_token` already in the URL.
 
 ## Data-loading errors
 
@@ -496,22 +614,34 @@ draft.
 
 ## Correctness and randomization
 
-Multiple Choice correctness is stored as a foreign key
-(`answers.is_correct` per answer row, resolved to a `correct_answer_id` at
-grading time), never as a positional letter. When a student session is
-created, question order and MC option order are shuffled and that
-per-session order is persisted (so re-rendering the same session is
-consistent), but the underlying answer records — and which one is
-correct — never change. Grading always re-resolves the submitted
-`selected_answer_id` against the answer table server-side.
+Multiple Choice correctness is stored as a foreign key (`answers.
+is_correct` per answer row), never as a positional letter. Question order
+and every question's answer-option order are shuffled per session (Phase
+7, `src/lib/student/shuffle.ts`, a `crypto.randomInt` Fisher-Yates) and
+persisted onto `quiz_sessions.question_order` the first time a session is
+loaded, so re-rendering the same session is always consistent — but the
+underlying `answers` rows, and which one is correct, never change.
+`submitAnswer` (Phase 7) resolves a submitted `selected_answer_id` against
+the real `answers` table itself on every write, computing `is_correct`
+there — never from `question_order`, and never from anything the client
+sends. Per-response correctness is recorded this way starting in Phase 7;
+aggregate scoring from those responses is Phase 8.
 
 ## Availability and timing enforcement
 
-`starts_at`, `ends_at`, and `duration_minutes` on the quiz are enforced
-server-side at two points: (1) session creation is refused outside the
-availability window, (2) every mutation on an existing session
-(answer submission, completion) re-checks `expires_at` computed from
-`started_at + duration_minutes`, independent of any client-reported timer.
+`starts_at`/`ends_at` (the quiz's deadline) and `duration_minutes` are
+enforced server-side at two points, by two different phases: (1) Phase 6
+— session creation (`startSession`) is refused outside the availability
+window, checked both when the join page renders and again at submit
+time; `quiz_sessions.expires_at` is computed once, at that point, from
+`duration_minutes` → `ends_at` → a 24h fallback, and stored — it is not
+recomputed later. (2) Phase 7 — every mutation on an existing session
+(`submitAnswer`, `submitQuiz`) independently re-checks that stored
+`expires_at` against the current time before writing anything, lazily
+recording an `expired` status the first time a check catches it past due
+(`src/lib/student/expiry.ts`). Neither point trusts a client-reported
+timer; the countdown a student sees is a display only (see "Student quiz
+player" above).
 
 ## Directory structure (grows per phase)
 
@@ -536,13 +666,14 @@ src/
           _components/          delete-quiz-button.tsx, pdf-generation-panel.tsx (Phase 4),
                                  publish-quiz-button.tsx, student-access-link.tsx (Phase 6)
         _components/          quiz-form.tsx — shared create/edit form
-      results/              Empty-state shell, Phase 9/10 fill it in
+      results/              Empty-state shell, Phase 8/9 fill it in
       settings/             Read-only account info (real profile data)
       _components/          Sidebar, Header, StatCard, mobile nav (Sheet-based)
-    (student)/               Phase 6 — public, no auth, no admin chrome
-      join/[token]/            Validate token, show quiz info, collect name, start a session
+    (student)/               Public, no auth, no admin chrome
+      join/[token]/            Phase 6 — validate token, show quiz info, collect name, start a session
         _components/             join-form.tsx
-      quiz/[sessionToken]/     Placeholder confirmation page — Phase 7 builds the real UI here
+      quiz/[sessionToken]/     Phase 7 — the real student quiz player
+        _components/             quiz-player.tsx
   components/
     ui/                   shadcn/ui primitives
   lib/
@@ -565,6 +696,10 @@ src/
       schema.ts                Phase 6 — Zod shape for first/last name input
       access.ts                 Phase 6 — loadPublishedQuizByToken (service-role client)
       join-actions.ts             Phase 6 — startSession (participant + quiz_session creation)
+      shuffle.ts                    Phase 7 — crypto.randomInt Fisher-Yates
+      expiry.ts                      Phase 7 — isSessionExpired/markSessionExpired, shared by the two files below
+      quiz-session.ts                  Phase 7 — loadPlayableSession (session state + per-session shuffle)
+      response-actions.ts                Phase 7 — submitAnswer/submitQuiz
     gemini/
       client.ts               Phase 4 — server-only GoogleGenAI client
       prompt.ts                Phase 4 — extraction prompt builder
@@ -578,7 +713,7 @@ src/
       assert-no-error.ts       Phase 2 — throw-on-Supabase-error helper
   proxy.ts                 Phase 1/2 — session refresh + optimistic redirects
 supabase/
-  migrations/              Phase 1–6 — SQL schema + RLS + grants + Storage + RPC, via Supabase CLI
+  migrations/              Phase 1–7 — SQL schema + RLS + grants + Storage + RPC, via Supabase CLI
 docs/                     Reference documentation (this directory)
 ```
 

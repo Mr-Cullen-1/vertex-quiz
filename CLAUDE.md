@@ -101,8 +101,11 @@ project:
   yet; see [docs/architecture.md](./docs/architecture.md) → "Quiz
   lifecycle".
 - **Student app** — public, unauthenticated, lives under a `(student)` route
-  group (added in Phase 7). Reached via `/join/{ACCESS_CODE}`. Interactive,
-  game-inspired but not a Kahoot clone.
+  group. Reached via `/join/{ACCESS_CODE}` (Phase 6: token validation, name
+  entry, participant/session creation); the real quiz-taking player at
+  `/quiz/{session_token}` (randomized order, answer persistence, timer,
+  submit) was added in Phase 7. Interactive, game-inspired but not a
+  Kahoot clone.
 - **AI pipeline** — isolated server-side service, `src/lib/gemini/`
   (Phase 4, implemented). Never called from the client; the Gemini API key
   never leaves the server. Gemini's raw output is Zod-shape-checked only —
@@ -184,13 +187,32 @@ afterward: `service_role` has exactly those five grants and nothing
 more, `anon` unchanged. Details: [docs/database.md](./docs/database.md)
 → "service_role privileges".
 
-Note on phase numbering: this closes out what the original table below
-called Phase 7 ("Student entry and session") too — the approved Phase 6
-task explicitly scoped in `/join/{token}`, participant creation, and
-quiz_session creation. Phase 8 ("Student quiz experience" — the actual
-question-answering UI) is the next real work.
+Note on phase numbering: this closes out what an earlier version of the
+table below called Phase 7 ("Student entry and session") too — the
+approved Phase 6 task explicitly scoped in `/join/{token}`, participant
+creation, and quiz_session creation. The table in §10 has since been
+renumbered so the next real work (the actual question-answering UI) is
+Phase 7, not Phase 8 — see the note under that table.
 
-Full verification logs (Phase 1–6):
+**Phase 7 — no table/column schema change; one privilege migration.**
+`quiz_sessions.question_order` and its `in_progress`/`completed`/
+`expired` status values, plus the entire `responses` table, all already
+existed from Phase 1 and sat unused until now. `service_role` again had
+zero grants on `questions`/`answers`/`responses` (re-checked live, same
+discipline as Phase 6) — fixed via
+`20260902120000_grant_student_quiz_player_privileges.sql`
+(`questions`/`answers`: `SELECT`; `quiz_sessions`: adds `UPDATE` to its
+existing `SELECT, INSERT`; `responses`: `SELECT, INSERT, UPDATE`).
+Verified live afterward: exactly those grants, nothing more, `anon`
+unchanged. Randomized per-session question/answer order is generated once
+and persisted onto `quiz_sessions.question_order` (a compare-and-swap on
+`status` prevents two racing loads from disagreeing); answers are upserted
+into `responses` on its existing `unique (session_id, question_id)`
+constraint, with `is_correct` always computed server-side from the real
+`answers` row, never from the client. Details:
+[docs/database.md](./docs/database.md) → "service_role privileges".
+
+Full verification logs (Phase 1–7):
 [docs/development-progress.md](./docs/development-progress.md).
 
 ## 7. Development rules
@@ -286,27 +308,32 @@ confirmation to continue.
 | 3 | Create Quiz and PDF upload | ✅ Done — PDF upload landed as part of Phase 4 |
 | 4 | Gemini AI extraction | ✅ Done — verified end-to-end with a real PDF and a real Gemini call |
 | 5 | Question review and editor | ✅ Done — approve/edit/add/delete/reorder, verified end-to-end |
-| 6 | Quiz publishing and student access | ✅ Done — publishing, access token, `/join/{token}`, participant + session creation, all verified end-to-end |
-| 7 | Student entry and session | ✅ Done — folded into Phase 6 above (see note below the table) |
-| 8 | Student quiz experience | ⏳ Next |
-| 9 | Results | Not started |
-| 10 | Analytics | Not started |
-| 11 | Final MVP polish | Not started |
+| 6 | Quiz publishing and student access | ✅ Done — publishing, access token, `/join/{token}`, participant + session creation; student entry/session folded in here too (an earlier version of this table listed that as a separate Phase 7 — see below) |
+| 7 | Student quiz player | ✅ Done — randomized per-session order, answer persistence, server-enforced timer, submit; verified end-to-end |
+| 8 | Results | Not started |
+| 9 | Analytics | Not started |
+| 10 | Final MVP polish | Not started |
 
-**Current phase:** 6 (Quiz publishing and student access) — **complete**.
-A teacher can publish a ready quiz (every question approved, composition
-verified server-side) via an explicit confirm dialog; the quiz becomes
-`published`, immutable (verified directly, including as the owning
-teacher hitting the question RPCs straight), and gets a real opaque
-access token shown as a copyable student link. A student can open
-`/join/{token}`, see the quiz's info, submit their first/last name
-(server-validated, server-side deadline check run twice — at page load
-and again at submit), and get a real `participants` + `quiz_sessions`
-row, landing on a placeholder `/quiz/{session_token}` page that Phase 8
-will build the real interface at. `service_role` needed a scoped grant
-first (`quizzes`: `SELECT`; `participants`/`quiz_sessions`: `SELECT,
-INSERT`) — reported and approved before being applied, never assumed.
-**Next phase:** 8 — Student quiz experience (the actual question-
-answering UI, timer enforcement, answer submission).
+**Current phase:** 7 (Student quiz player) — **complete**. A student who
+starts a session at `/join/{token}` now lands on a real quiz player at
+`/quiz/{session_token}`: questions and answer options are shuffled once
+per session and stay stable across refreshes, selecting an option
+persists it immediately (and can be changed before submitting), a
+countdown derived from the server's `expires_at` is enforced on every
+write (not just displayed), and a confirmed Submit locks the session and
+shows a confirmation. `service_role` needed a second scoped grant
+(`questions`/`answers`: `SELECT`; `quiz_sessions`: `UPDATE` added to its
+existing grants; `responses`: `SELECT, INSERT, UPDATE`) — reported with
+the exact minimal migration and applied. No scoring, correct-answer
+reveal, or results page — those are Phase 8.
+**Next phase:** 8 — Results (score computation from `responses`, a
+results view for students and/or teachers).
+
+Note on the table above: an earlier version numbered "Student entry and
+session" as its own Phase 7 (folded into Phase 6 once the actual approved
+task scoped it that way) and "Student quiz experience" as Phase 8. The
+table has been renumbered so the phase just completed is Phase 7 and
+Results/Analytics/Final polish shift down to 8/9/10 — no scope changed,
+only the numbering.
 
 Live status detail: [docs/development-progress.md](./docs/development-progress.md).

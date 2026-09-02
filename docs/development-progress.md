@@ -1224,3 +1224,201 @@ these docs as done:** the actual question-answering interface, answer
 submission, response recording, countdown/timer enforcement against
 `expires_at`, question/answer randomization, scoring, results, and
 anything past the `/quiz/[sessionToken]` placeholder page.
+
+---
+
+## Phase 7 — Student quiz player ✅
+
+**Date:** 2026-09-02
+
+**Goal:** replace the `/quiz/[sessionToken]` placeholder with the real
+question-answering interface — randomized per-session order, answer
+persistence, server-enforced timer, and final submit. Explicitly out of
+scope (left for Phase 8): scoring, results, teacher analytics.
+
+**1. Privileges inspected before writing any code.** Live
+`information_schema.role_table_grants` check (same discipline as every
+prior phase): `service_role` still had exactly the five grants Phase 6
+left it — `quizzes`: `SELECT`; `participants`/`quiz_sessions`: `SELECT,
+INSERT` — and zero grants on `questions`/`answers`/`responses`, no
+`UPDATE` anywhere. The player needs to read quiz content with no
+Supabase Auth session, persist a one-time shuffle onto `quiz_sessions`,
+and read/write `responses`, so a new migration was required.
+
+**Migration applied:**
+`supabase/migrations/20260902120000_grant_student_quiz_player_privileges.sql`:
+
+```sql
+grant select on public.questions to service_role;
+grant select on public.answers to service_role;
+grant update on public.quiz_sessions to service_role;
+grant select, insert, update on public.responses to service_role;
+```
+
+Applied via `npx supabase db push` and independently re-verified live
+afterward: `service_role` now has exactly SELECT on `questions`/`answers`,
+its existing SELECT+INSERT on `participants`/`quiz_sessions` plus the new
+UPDATE, and SELECT+INSERT+UPDATE on `responses` — no `DELETE` anywhere,
+no `INSERT` on `questions`/`answers`, `quizzes`/`participants` unchanged
+from Phase 6. `anon` re-checked unchanged (still zero non-
+REFERENCES/TRIGGER/TRUNCATE grants). `npx supabase migration list` shows
+all 8 migrations in sync, local/remote.
+
+**2. What was built:**
+
+- `src/lib/student/shuffle.ts` — a `crypto.randomInt`-based Fisher-Yates
+  shuffle, consistent with this codebase's existing token-generation style.
+- `src/lib/student/expiry.ts` — `isSessionExpired()` (the one, shared
+  `expires_at < now()` check) and `markSessionExpired()` (best-effort,
+  lazily flips `status` to `'expired'` the first time anything discovers
+  the deadline has passed while the session was `started`/`in_progress`).
+  `expires_at`, never `status`, is the actual authority — this only keeps
+  `status` honest for any future teacher-facing view.
+- `src/lib/student/quiz-session.ts` — `loadPlayableSession(sessionToken)`,
+  the single entry point the player page and nothing else calls. Resolves
+  a session by its opaque token only; every relationship (quiz, questions,
+  answers, prior responses) is re-derived from that row, never trusted
+  from the caller. Returns one of four states: `not_found`, `expired`,
+  `completed`, or `active` (with the session's questions/answers in
+  session order and any previously-selected answers, but never
+  `is_correct`). On first load of an active session it generates the
+  session's one-time question/answer shuffle and persists it to the
+  existing `quiz_sessions.question_order` column — provisioned back in
+  Phase 1 for exactly this — using a compare-and-swap on `status` (not a
+  jsonb equality filter, which has its own PostgREST quirks) so two
+  requests racing to generate the shuffle can't produce two different
+  persisted orders; the loser re-reads whichever order won. Every later
+  load reads the persisted order, so "the same session always sees the
+  same order" holds across refreshes and the occasional race alike.
+- `src/lib/student/response-actions.ts` — two Server Actions:
+  - `submitAnswer(sessionToken, questionId, answerId)`: re-derives the
+    session from the token, rejects if completed or past `expires_at`
+    (lazily marking `expired`), confirms `questionId` is one of this
+    session's own shuffled questions, confirms `answerId` genuinely
+    belongs to `questionId` via a fresh `answers` lookup (never trusting
+    the session's own cached shuffle for this), computes `is_correct`
+    itself from that lookup, then upserts one `responses` row keyed on the
+    existing `unique (session_id, question_id)` constraint — first
+    selection inserts, changing an answer updates the same row. Every
+    return value carries a `stale` flag so the client can tell "this one
+    write failed, show an inline error" (`stale: false`) apart from "the
+    whole session moved on — expired/submitted/gone, re-fetch everything"
+    (`stale: true`).
+  - `submitQuiz(sessionToken)`: idempotent (already-`completed` returns
+    success without re-writing anything), rejects if the deadline has
+    already passed — `expired` and `completed` are deliberately distinct
+    terminal states, matching the schema's own `status` enum, so a student
+    who let the timer run out sees the expired state, never a false
+    "submitted" confirmation. On success, sets `status = 'completed'` and
+    `completed_at`. No score is computed or persisted anywhere in Phase 7.
+- `src/app/(student)/quiz/[sessionToken]/page.tsx` — rewritten from the
+  Phase 6 placeholder. Renders one of four things based on
+  `loadPlayableSession`'s state: a generic "isn't available" card
+  (`not_found` — a wrong token, a draft/closed quiz, and a genuinely
+  unknown token are all indistinguishable, same pattern as `/join/
+  [token]`), a "Time's up" card (`expired`), a "Quiz submitted!"
+  confirmation (`completed`), or the real `<QuizPlayer />` (`active`).
+- `src/app/(student)/quiz/[sessionToken]/_components/quiz-player.tsx` —
+  the player itself, Vertex-branded, mobile-first: sticky header with the
+  logo, "Question X of N", a live countdown, and a progress bar; the
+  current question with A/B/C/D-labeled MC options or True/False options,
+  clear selected state, and a numbered jump-to-question row (answered
+  questions visually distinguished); Previous/Next, and a Submit button on
+  the last question that opens the same `AlertDialog` confirmation pattern
+  used by `PublishQuizButton`. Selecting an option updates local state
+  immediately and fires `submitAnswer` in the background; a `stale` result
+  triggers `router.refresh()` so the server-rendered state (expired/
+  submitted) takes over, rather than the client silently pretending
+  nothing happened. The countdown reads `expires_at` corrected by a single
+  server-vs-client clock-offset sample taken at load — a display
+  refinement only, never the actual enforcement, which is always the
+  server's own `expires_at` re-check on every write. Calling `Date.now()`
+  during render is disallowed by this codebase's React Compiler lint
+  rules, so all of the timer's impure reads live inside a `useEffect`, and
+  "has the timer hit zero" is a derived value rather than a second piece
+  of state set from an effect. At zero, the player locks input and calls
+  `router.refresh()` after a short pause so the server's own (already-
+  enforced) expiry check renders the real state.
+
+**No new schema.** `quiz_sessions.question_order` and every `quiz_sessions`
+status value used here (`started` → `in_progress` → `completed`/`expired`)
+already existed from Phase 1 and were simply put to use for the first time.
+
+**3. Real end-to-end verification performed (not just code review),
+using two layers against the real Supabase project:**
+
+- **Direct production-code integration tests** (40 assertions): the
+  actual `loadPlayableSession`/`submitAnswer`/`submitQuiz`/`startSession`
+  functions were imported and run directly against the live database via
+  Node's native TypeScript support, using `node --conditions=react-server`
+  plus a small custom loader to resolve this codebase's `@/*` path alias
+  and let the `server-only`-guarded modules import cleanly outside Next's
+  bundler (the `react-server` export condition resolves `server-only` to
+  its no-op stub instead of the throwing default). This is real production
+  code under real network I/O, not a reimplementation. Covered: two
+  students joining the same quiz get different tokens; a session's
+  question/answer order is stable across repeated loads and (checked
+  against a second session of the same quiz) is genuinely randomized, not
+  fixed; answering, changing an answer (confirmed exactly one `responses`
+  row via a direct count, not two), and persistence across reloads; that
+  `responses.is_correct` is computed server-side and matches the real
+  `answers.is_correct` row, never a client-supplied value; an answer
+  naming a different question's option is rejected; an answer naming a
+  question from a completely different teacher's quiz is rejected; an
+  unknown/forged session token is rejected as `stale`; a session whose
+  deadline was forced into the past *before it was ever loaded* rejects
+  the write and gets lazily marked `expired`, and `loadPlayableSession`
+  independently reports the same `expired` state afterward; submitting
+  succeeds while active and flips the session to `completed`; answering
+  after submission is rejected as `stale`; re-submitting an already-
+  completed session is idempotent; submitting an already-expired
+  (never-completed) session is rejected, not silently accepted as
+  "completed".
+- **Real-browser UI tests** (17 assertions, Chromium via a temporarily
+  installed `playwright`, never added to `package.json`): the actual
+  `/join/[token]` → `/quiz/[sessionToken]` flow end to end — quiz info
+  renders, name submission redirects to the player, the question and
+  timer render, clicking an option shows the selected state
+  (`aria-pressed`), Next/Previous navigate and preserve the selection,
+  reloading the page preserves both the exact question order and the
+  selected answer, the Submit confirmation dialog appears with the
+  right copy, confirming shows "Quiz submitted!", reloading a submitted
+  session shows the same confirmation rather than a re-openable player,
+  and an invalid session token shows the generic unavailable message with
+  no internal detail. A second, separate run forced a session's
+  `expires_at` to 4 seconds out and confirmed the on-screen countdown
+  actually ticks down, the player locks and shows "Time's up." the moment
+  it hits zero, the page then auto-refreshes into the server-rendered
+  expired state, and the database independently confirms `status =
+  'expired'` — proving the timer isn't just a display, it drives a real
+  state transition backed by the server's own check.
+- **Security-specific**: `is_correct` is never present on any answer
+  object `loadPlayableSession` returns to the player; every
+  `submitAnswer` relationship (session→question, question→answer) is
+  re-verified against the database on every call, not cached from the
+  initial shuffle; a forged/unknown session token, a cross-quiz question
+  id, and a cross-question answer id were all exercised directly and
+  rejected; `.next/static` was re-checked for `SUPABASE_SECRET_KEY` and
+  `GEMINI_API_KEY` after a fresh production build — zero matches;
+  `createAdminClient()` is only ever called from `server-only`- or
+  `"use server"`-guarded modules.
+- **Cleanup**: every temporary teacher account created by both test
+  layers (including one pair the Admin API transiently failed to delete
+  on the first attempt — the same known cascade-depth quirk from Phase
+  4/5, resolved the same way: delete the owned `quizzes` rows first, then
+  the user) was removed, and a final live query confirmed
+  `participants`/`quiz_sessions`/`responses` all back to their pre-test
+  row counts project-wide. The temporary `playwright` dependency and every
+  temporary test script were removed; `package.json`/`package-lock.json`
+  show no diff from before this phase.
+
+**Validation:** `npx tsc --noEmit`, `npm run lint` (including this
+project's React Compiler purity rules — two real lint errors around
+calling `Date.now()` during render and setting derived state from an
+effect were caught and fixed, not suppressed), `npm run build`, and `npm
+run lint:sql` (all 8 migrations) all clean. `npx supabase migration list`
+confirms local/remote match.
+
+**Still not implemented — Phase 8 and later:** scoring, correct-answer
+reveal, results pages, teacher analytics, and anything beyond a
+student successfully submitting a session.

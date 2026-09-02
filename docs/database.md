@@ -20,7 +20,14 @@ sat unused until now. It did require one privilege migration: `service_role`
 had zero table grants (found in Phase 5, confirmed still true at the start
 of Phase 6), which blocked the student-facing half entirely until a
 minimal, explicitly-approved grant was applied — see "service_role
-privileges" below. SQL migrations live under `supabase/migrations/`:
+privileges" below. Phase 7 (student quiz player) likewise required **no
+table/column schema change** — `quiz_sessions.question_order` and the
+`in_progress`/`completed`/`expired` values of `quiz_sessions.status` were
+all provisioned in Phase 1 and, again, sat unused until Phase 7 finally
+wrote to them; `responses` also went from a fully unused table to the one
+Phase 7 reads and writes. It required its own privilege migration for the
+same reason as Phase 6 — see "service_role privileges" below. SQL
+migrations live under `supabase/migrations/`:
 
 - `20260829120000_create_core_schema.sql` — tables, indexes, constraints,
   triggers.
@@ -38,17 +45,20 @@ privileges" below. SQL migrations live under `supabase/migrations/`:
 - `20260830130000_grant_student_access_privileges.sql` — the `service_role`
   grants student access needed (Phase 6) — see "service_role privileges"
   below.
+- `20260902120000_grant_student_quiz_player_privileges.sql` — the
+  `service_role` grants the student quiz player needed (Phase 7) — see
+  "service_role privileges" below.
 
-`npx supabase migration list` confirms all seven are recorded as applied
+`npx supabase migration list` confirms all eight are recorded as applied
 on the remote (local and remote timestamps match). Everything below was
 independently re-verified by querying the live database directly
 (`supabase db query --linked`) — not just re-reading the migration files —
 including a functional test of the deferred answer-count trigger (insert
 invalid/valid answer sets inside a transaction, then roll back), a real
-teacher login against the deployed app, and (Phase 4/5/6) real PDFs/
-questions/quizzes/student sessions created through the actual running
-application. See [development-progress.md](./development-progress.md)
-Phase 1–6 for the full verification logs and exact results.
+teacher login against the deployed app, and (Phase 4–7) real PDFs/
+questions/quizzes/student sessions/responses created through the actual
+running application. See [development-progress.md](./development-progress.md)
+Phase 1–7 for the full verification logs and exact results.
 
 ## Table privileges — a Phase 1 gap fixed in Phase 2
 
@@ -127,15 +137,14 @@ grant select, insert on public.quiz_sessions to service_role;
 | `participants` | `SELECT`, `INSERT` | Create the student's participant row; `SELECT` is needed for PostgREST to return the inserted row (`.select()` after `.insert()`). |
 | `quiz_sessions` | `SELECT`, `INSERT` | Create the session row referencing the quiz + participant; same `.select()`-after-`.insert()` reasoning. |
 
-**Deliberately not granted:** `INSERT`/`UPDATE`/`DELETE` on `quizzes`
-(publishing/editing stays exclusively a teacher/`authenticated`
+**Deliberately not granted (Phase 6):** `INSERT`/`UPDATE`/`DELETE` on
+`quizzes` (publishing/editing stays exclusively a teacher/`authenticated`
 operation), `UPDATE`/`DELETE` on `participants`/`quiz_sessions` (nothing
-in the Phase 6 join flow modifies either after creation — session status
-transitions belong to Phase 7/8), and anything at all on `responses`
-(untouched until the actual quiz-taking phase). This was verified live
-after applying the migration, not assumed: `information_schema.
-role_table_grants` for `service_role` shows exactly the five
-select/insert grants above and nothing else, and `anon`'s grants
+in the Phase 6 join flow modifies either after creation), and anything at
+all on `responses` (untouched until the quiz-taking phase). This was
+verified live after applying the migration, not assumed:
+`information_schema.role_table_grants` for `service_role` showed exactly
+the five select/insert grants above and nothing else, and `anon`'s grants
 (still zero rows) and `authenticated`'s grants (unchanged from Phase 2)
 were both re-checked at the same time.
 
@@ -145,6 +154,37 @@ added, changed, or needed. An `anon`-facing `SELECT` policy on `quizzes`
 was considered and rejected as the wrong shape for this project, since it
 would create a public-enumeration surface a service-role-only read does
 not.
+
+**Phase 7 (student quiz player) — the next grant this project needed.**
+Re-checked live before writing any code, per the same discipline as every
+prior phase: `service_role` still had exactly the five grants above, and
+zero rows for `questions`/`answers`/`responses`. The player needs to read
+quiz content with no Supabase Auth session, persist a session's one-time
+shuffle onto `quiz_sessions`, and read/write `responses` — applied via
+`20260902120000_grant_student_quiz_player_privileges.sql`:
+
+```sql
+grant select on public.questions to service_role;
+grant select on public.answers to service_role;
+grant update on public.quiz_sessions to service_role;
+grant select, insert, update on public.responses to service_role;
+```
+
+| Table | Grant | Why |
+|---|---|---|
+| `questions`, `answers` | `SELECT` | Loading a session's quiz content — question text, answer options — for a request with no Supabase Auth JWT for RLS to key off. |
+| `quiz_sessions` | `UPDATE` (in addition to Phase 6's `SELECT`/`INSERT`) | Persist the per-session shuffle into `question_order`, transition `status` (`started` → `in_progress` → `completed`/`expired`), and stamp `completed_at`. |
+| `responses` | `SELECT`, `INSERT`, `UPDATE` | Record and change a student's answer before submission — one row per session/question, upserted on the existing `unique (session_id, question_id)` constraint; `SELECT` is needed for PostgREST to return the row after an insert/update. |
+
+**Deliberately not granted:** `INSERT`/`DELETE` on `questions`/`answers`
+(content stays teacher/RPC-owned — a student session never creates or
+removes quiz content), `DELETE` on `quiz_sessions`/`responses` (nothing
+in this MVP ever deletes a session or a response), and no change at all
+to `quizzes`/`participants` beyond what Phase 6 already granted. Verified
+live after applying the migration: `service_role` has exactly SELECT on
+`questions`/`answers`, its Phase 6 SELECT+INSERT plus the new UPDATE on
+`quiz_sessions`, and SELECT+INSERT+UPDATE on `responses` — nothing more;
+`anon` unchanged (still zero non-REFERENCES/TRIGGER/TRUNCATE grants).
 
 ## Principles
 
@@ -291,14 +331,28 @@ Indexes: `quiz_sessions (quiz_id)`, `quiz_sessions (participant_id)`.
 Deliberately no `unique (quiz_id, participant_id)` — Phase 6 decided the
 MVP re-entry policy: reopening a join link starts a brand-new,
 independent participant + session (first/last name are never treated as
-a unique identity, so no dedup is attempted). Rows are written by
+a unique identity, so no dedup is attempted). Rows are inserted by
 `src/lib/student/join-actions.ts` through the service-role client;
 `session_token` reuses `generateAccessToken()` from the Phase 6 publish
 flow (a fresh random value each call, retried up to 3 times on the
 astronomically unlikely unique-constraint collision). `question_order`
-stays at its `[]` default and `status` is always inserted as `'started'`
-— Phase 6 only creates the row; shuffling, status transitions, and
-`expires_at` enforcement against real answers are Phase 7.
+stays at its `[]` default and `status` is always inserted as `'started'`.
+
+**Phase 7** is what actually reads and writes the rest of this table.
+`src/lib/student/quiz-session.ts` persists this session's one-time
+question/answer shuffle into `question_order` the first time it's loaded
+(a jsonb object `{ questions: uuid[], answers: { [questionId]: uuid[] }
+}` — display order only, never changing which `answers` row is actually
+correct) and flips `status` from `started` to `in_progress` in the same
+statement, using a compare-and-swap on `status` so two racing requests
+can't each persist a different order. `src/lib/student/expiry.ts` flips
+`status` to `expired` (best effort) the first time anything discovers
+`expires_at` has passed while the session was `started`/`in_progress` —
+`expires_at`, not `status`, remains the actual authority checked on every
+read and write. `src/lib/student/response-actions.ts`'s `submitQuiz` sets
+`status = 'completed'` and `completed_at`. `score`/`correct_answers`
+remain unwritten — Phase 7 explicitly does not compute or persist a
+score; that's Phase 8.
 
 ### `responses`
 
@@ -313,7 +367,13 @@ stays at its `[]` default and `status` is always inserted as `'started'`
 | time_spent_seconds    | int         | nullable, `>= 0`                                |
 
 Constraint: `unique (session_id, question_id)` — one response per question
-per session. Indexes: `responses (session_id)`, `responses (question_id)`.
+per session, which is exactly the constraint Phase 7's `submitAnswer`
+upserts on (`onConflict: "session_id,question_id"`): the first selection
+for a question inserts a row, changing the answer updates that same row
+in place rather than creating a second one. `time_spent_seconds` is
+defined but not populated by Phase 7 — nothing currently measures
+per-question timing. Indexes: `responses (session_id)`,
+`responses (question_id)`.
 
 ## Row Level Security (implemented policies)
 
@@ -841,3 +901,61 @@ migrations in sync between local and remote.
   `participants` and `quiz_sessions` both contain zero rows project-wide,
   and `auth.users`/`quizzes` contain only the one pre-existing real
   account and its own quiz.
+
+## Live verification — Phase 7 student quiz player (2026-09-02)
+
+Migration `20260902120000_grant_student_quiz_player_privileges.sql`
+applied via `npx supabase db push` and independently re-verified against
+the live database — see "service_role privileges" above for the exact
+grants confirmed (`questions`/`answers`: `SELECT`; `quiz_sessions`: the
+Phase 6 `SELECT, INSERT` plus `UPDATE`; `responses`: `SELECT, INSERT,
+UPDATE`; nothing else, `anon` unchanged). `npx supabase migration list`
+confirmed all eight migrations in sync between local and remote.
+
+- **Randomization and persistence, against real data**: two students
+  joining the same real published quiz received question orders that
+  differed from each other; reloading either session's `question_order`
+  (both directly via SQL and through `loadPlayableSession`) returned the
+  identical order every time, confirming the compare-and-swap persistence
+  actually holds instead of re-shuffling on every read.
+- **Answer persistence and correctness, real writes**: selecting an
+  answer inserted exactly one `responses` row (confirmed by a direct
+  count); changing the answer updated that same row rather than creating
+  a second one; `responses.is_correct` was read back directly and matched
+  the real `answers.is_correct` value for both a correct and an incorrect
+  selection, confirming the server computes it from the database, not
+  from anything the client sent.
+- **Security, directly against the running functions**: an answer naming
+  a real answer that belongs to a *different* question in the same quiz
+  was rejected; an answer naming a question from an entirely different
+  teacher's quiz was rejected; a syntactically plausible but nonexistent
+  session token was rejected as `stale` by `submitAnswer` and as
+  `not_found` by `loadPlayableSession`.
+- **Expiry, forced rather than waited for**: a session's `expires_at` was
+  set into the past directly in the database *before it was ever loaded*
+  (simulating a student who never opened the link in time); the first
+  `submitAnswer` against it was rejected and lazily flipped `status` to
+  `expired`, and a subsequent `loadPlayableSession` independently
+  confirmed the same expired state. In a separate real-browser run,
+  `expires_at` was set 4 seconds out on an already-active session and the
+  on-screen countdown was watched ticking down to zero, the player
+  locking and showing "Time's up.", the page auto-refreshing into the
+  server-rendered expired card, and the database confirming `status =
+  'expired'` afterward — the full chain from client display to persisted
+  server state.
+- **Submit/idempotency**: submitting a session while active set `status =
+  'completed'`; answering after that was rejected; re-submitting an
+  already-completed session succeeded without error (idempotent) and
+  without re-writing anything; submitting an already-expired,
+  never-completed session was rejected rather than silently marked
+  completed.
+- **No secret leakage**: re-checked a fresh production build's
+  `.next/static` for `SUPABASE_SECRET_KEY` and `GEMINI_API_KEY` — zero
+  matches.
+- **Cleanup**: every temporary teacher account created by both the direct
+  integration tests and the real-browser tests was deleted (cascading to
+  their quizzes, questions, answers, participants, sessions, and
+  responses) via the Admin API. A final live count confirmed
+  `participants`/`quiz_sessions`/`responses` all back to zero rows
+  project-wide, and `auth.users`/`quizzes` back to only the one
+  pre-existing real account and its own quiz.
