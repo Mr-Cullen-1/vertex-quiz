@@ -3,6 +3,12 @@
 import { createPartFromBase64 } from "@google/genai";
 import { createClient } from "@/lib/supabase/server";
 import { getGeminiClient, GEMINI_MODEL, GEMINI_REQUEST_TIMEOUT_MS } from "@/lib/gemini/client";
+import {
+  classifyGeminiFailure,
+  GEMINI_FAILURE_MESSAGE,
+  GEMINI_MAX_ATTEMPTS,
+  GEMINI_RETRYABLE_STATUS_CODES,
+} from "@/lib/gemini/errors";
 import { geminiExtractionSchema, geminiResponseJsonSchema } from "@/lib/gemini/schema";
 import { buildExtractionPrompt } from "@/lib/gemini/prompt";
 import { validateExtraction } from "@/lib/gemini/validate";
@@ -157,19 +163,19 @@ export async function generateQuestions(quizId: string): Promise<GenerateQuestio
       config: {
         responseMimeType: "application/json",
         responseJsonSchema: geminiResponseJsonSchema,
-        httpOptions: { timeout: GEMINI_REQUEST_TIMEOUT_MS },
+        httpOptions: {
+          timeout: GEMINI_REQUEST_TIMEOUT_MS,
+          retryOptions: {
+            attempts: GEMINI_MAX_ATTEMPTS,
+            httpStatusCodes: GEMINI_RETRYABLE_STATUS_CODES,
+          },
+        },
       },
     });
     responseText = response.text ?? "";
   } catch (err) {
     console.error("Gemini request failed:", err);
-    const timedOut = err instanceof Error && (err.name === "AbortError" || /timeout/i.test(err.message));
-    return {
-      success: false,
-      error: timedOut
-        ? "The AI service took too long to respond. Please try again."
-        : "The AI service failed to process this PDF. Please try again.",
-    };
+    return { success: false, error: GEMINI_FAILURE_MESSAGE[classifyGeminiFailure(err)] };
   }
 
   if (!responseText.trim()) {
