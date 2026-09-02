@@ -2,7 +2,7 @@
 
 import { createPartFromBase64 } from "@google/genai";
 import { createClient } from "@/lib/supabase/server";
-import { getGeminiClient, GEMINI_MODEL } from "@/lib/gemini/client";
+import { getGeminiClient, GEMINI_MODEL, GEMINI_REQUEST_TIMEOUT_MS } from "@/lib/gemini/client";
 import { geminiExtractionSchema, geminiResponseJsonSchema } from "@/lib/gemini/schema";
 import { buildExtractionPrompt } from "@/lib/gemini/prompt";
 import { validateExtraction } from "@/lib/gemini/validate";
@@ -157,12 +157,19 @@ export async function generateQuestions(quizId: string): Promise<GenerateQuestio
       config: {
         responseMimeType: "application/json",
         responseJsonSchema: geminiResponseJsonSchema,
+        httpOptions: { timeout: GEMINI_REQUEST_TIMEOUT_MS },
       },
     });
     responseText = response.text ?? "";
   } catch (err) {
     console.error("Gemini request failed:", err);
-    return { success: false, error: "The AI service failed to process this PDF. Please try again." };
+    const timedOut = err instanceof Error && (err.name === "AbortError" || /timeout/i.test(err.message));
+    return {
+      success: false,
+      error: timedOut
+        ? "The AI service took too long to respond. Please try again."
+        : "The AI service failed to process this PDF. Please try again.",
+    };
   }
 
   if (!responseText.trim()) {

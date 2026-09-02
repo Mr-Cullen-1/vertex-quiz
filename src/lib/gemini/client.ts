@@ -12,6 +12,18 @@ import { getEnv } from "@/lib/env";
  */
 export const GEMINI_MODEL = "gemini-flash-latest";
 
+/**
+ * Without an explicit `httpOptions.timeout`, the SDK leaves Node's
+ * underlying HTTP client (undici) at its own default headers timeout —
+ * 5 minutes — so a stalled Gemini connection leaves the teacher staring
+ * at "Generating..." for that entire time before finally failing (seen
+ * for real: `UND_ERR_HEADERS_TIMEOUT` at ~5.1 minutes). 2 minutes is
+ * generous for a single PDF extraction call on `gemini-flash-latest`
+ * while failing fast enough that "Try again" is a reasonable next step
+ * rather than another multi-minute wait.
+ */
+export const GEMINI_REQUEST_TIMEOUT_MS = 2 * 60 * 1000;
+
 let cached: GoogleGenAI | null = null;
 
 /**
