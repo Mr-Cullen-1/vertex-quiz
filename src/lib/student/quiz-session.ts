@@ -2,7 +2,8 @@ import "server-only";
 import { z } from "zod";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { shuffle } from "./shuffle";
-import { isSessionExpired, markSessionExpired } from "./expiry";
+import { isSessionExpired } from "./expiry";
+import { computeResult, finalizeSession, type QuizResult } from "./scoring";
 
 const questionOrderSchema = z.object({
   questions: z.array(z.string()),
@@ -41,8 +42,8 @@ export type ActiveSession = {
 
 export type SessionView =
   | { state: "not_found" }
-  | { state: "expired"; quizTitle: string; participantFirstName: string }
-  | { state: "completed"; quizTitle: string; participantFirstName: string }
+  | { state: "expired"; quizTitle: string; participantName: string; result: QuizResult }
+  | { state: "completed"; quizTitle: string; participantName: string; result: QuizResult }
   | { state: "active"; session: ActiveSession };
 
 type SessionRow = {
@@ -53,7 +54,7 @@ type SessionRow = {
   question_order: unknown;
   total_questions: number;
   quizzes: { title: string; status: string } | null;
-  participants: { first_name: string } | null;
+  participants: { first_name: string; last_name: string } | null;
 };
 
 /**
@@ -155,7 +156,7 @@ export async function loadPlayableSession(sessionToken: string): Promise<Session
   const { data: session, error } = await admin
     .from("quiz_sessions")
     .select(
-      "id, quiz_id, status, expires_at, question_order, total_questions, quizzes(title, status), participants(first_name)"
+      "id, quiz_id, status, expires_at, question_order, total_questions, quizzes(title, status), participants(first_name, last_name)"
     )
     .eq("session_token", sessionToken)
     .maybeSingle()
@@ -171,16 +172,24 @@ export async function loadPlayableSession(sessionToken: string): Promise<Session
 
   const quizTitle = session.quizzes.title;
   const participantFirstName = session.participants?.first_name ?? "Student";
+  const participantName = session.participants
+    ? `${session.participants.first_name} ${session.participants.last_name}`
+    : "Student";
 
   if (session.status === "completed") {
-    return { state: "completed", quizTitle, participantFirstName };
+    const result = await computeResult(admin, session.id, session.total_questions);
+    return { state: "completed", quizTitle, participantName, result };
   }
 
   if (isSessionExpired(session.expires_at)) {
-    if (session.status !== "expired") {
-      await markSessionExpired(admin, session.id);
-    }
-    return { state: "expired", quizTitle, participantFirstName };
+    const result = await finalizeSession(
+      admin,
+      session.id,
+      session.total_questions,
+      "expired",
+      new Date().toISOString()
+    );
+    return { state: "expired", quizTitle, participantName, result };
   }
 
   let order = parseQuestionOrder(session.question_order);

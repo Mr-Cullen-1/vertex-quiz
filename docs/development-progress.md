@@ -1422,3 +1422,212 @@ confirms local/remote match.
 **Still not implemented — Phase 8 and later:** scoring, correct-answer
 reveal, results pages, teacher analytics, and anything beyond a
 student successfully submitting a session.
+
+---
+
+## Phase 8 — Scoring and results ✅
+
+**Date:** 2026-09-02
+
+**Goal:** score a session server-side the moment it ends (submit or
+expiry), let a student see their own result, and let a teacher see every
+student's result for a quiz they own. Explicitly out of scope: analytics
+dashboards, charts, per-question breakdowns, leaderboards.
+
+**1. Inspected before writing anything, per the task's own instruction —
+found the schema and privileges already fit, so no migration was
+needed.** Live column check on `quiz_sessions`
+(`information_schema.columns`) confirmed `score numeric(5,2)` and
+`correct_answers integer` already existed from Phase 1, sitting unused —
+exactly the two values a result needs to persist. `total_questions` was
+already stored and populated at session creation (Phase 6).
+`incorrect_answers`/`unanswered_questions` were deliberately **not**
+added as columns: both are always derivable (`incorrect = answered -
+correct`, `unanswered = total - answered`) from a `responses` row count,
+so storing them would just be data that could drift from the truth it's
+derived from. Live grant checks (same discipline as every prior phase):
+`service_role` already had `SELECT` on `responses` and `UPDATE` on
+`quiz_sessions` (both granted in Phase 7) — exactly what server-side
+scoring needs to read responses and persist a result. `authenticated`
+already had `SELECT` on `quiz_sessions`/`participants`/`responses`
+(Phase 2), scoped by their existing `*_select_own_quiz` RLS policies
+(Phase 1) — exactly what a teacher results page needs. **Result: zero
+new migrations, zero new grants, zero RLS changes for this entire
+phase.**
+
+**2. What was built:**
+
+- `src/lib/student/scoring.ts` (new) — the one place that turns a
+  session's saved `responses` into a result:
+  - `computeResult(admin, sessionId, totalQuestions)`: reads
+    `responses.is_correct` for the session (already resolved against the
+    real `answers` row, by id, back when each answer was submitted in
+    Phase 7 — the randomized on-screen position never enters this
+    calculation), and derives `answeredQuestions`, `correctAnswers`,
+    `incorrectAnswers`, `unansweredQuestions`, and an integer
+    `scorePercentage = Math.round((correct / total) * 100)`. Always
+    recomputed fresh from `responses` — never from the persisted
+    `quiz_sessions.score`/`correct_answers` columns, which exist purely
+    as a bulk-read cache for the teacher results list (avoiding an
+    N-query fan-out there), not as the source of truth for a single
+    session's own display.
+  - `finalizeSession(admin, sessionId, totalQuestions, status,
+    completedAt)`: computes the result, then persists `score`,
+    `correct_answers`, `status` (`completed` or `expired`), and
+    `completed_at` in one `UPDATE` guarded by a compare-and-swap on
+    `status` (`.in("status", ["started", "in_progress"])`) — the same
+    pattern Phase 7 used for `question_order`. Only one caller's `UPDATE`
+    can ever actually land; every other caller (a double submit, a submit
+    racing an expiry detection, a retried request) matches zero rows and
+    falls back to recomputing fresh from `responses` — safe because every
+    write path already refuses to touch `responses` once `status` is no
+    longer `started`/`in_progress`, so nothing can change between the
+    winner's computation and a loser's.
+- `src/lib/student/response-actions.ts` (modified) — `submitQuiz` now
+  calls `finalizeSession(..., "completed", ...)` instead of a plain
+  status update; both `submitQuiz` and `submitAnswer`'s expiry branches
+  call `finalizeSession(..., "expired", ...)` instead of the old
+  `markSessionExpired` — so a session that runs out of time gets scored
+  from whatever was saved, exactly like an explicit submit, the moment
+  anything next touches it.
+- `src/lib/student/expiry.ts` (trimmed) — `markSessionExpired` was
+  removed; `finalizeSession` supersedes it (it already flips `status`
+  to `expired` as part of persisting the result). `isSessionExpired`
+  (the actual `expires_at` check) is unchanged.
+- `src/lib/student/quiz-session.ts` (modified) — `loadPlayableSession`'s
+  `completed` branch now calls `computeResult` (read-only — the result
+  was already finalized by whichever call completed the session) and its
+  expiry branch now calls `finalizeSession` (so a session discovered
+  expired for the first time, e.g. a page load after the deadline with no
+  prior submit, gets scored right then, from whatever responses exist).
+  Both terminal states in `SessionView` now carry a `QuizResult` and the
+  participant's full name (`first_name last_name` — the join query was
+  extended to select `last_name` too; the active/in-progress state still
+  only surfaces `participantFirstName`, unused by the player UI).
+- `src/app/(student)/quiz/[sessionToken]/page.tsx` (modified) — the
+  `completed`/`expired` branches now render a `ResultCard`: Vertex logo,
+  quiz title, student's full name, a large score percentage, and a
+  three-way correct/incorrect/unanswered breakdown plus total question
+  count — matching the product spec's "85% · 17/20" framing, extended
+  with the incorrect/unanswered counts Phase 8 asked for. Per spec and
+  per this phase's instructions, it never shows which specific answers
+  were right or wrong, correct-answer text, or any internal id.
+- `src/app/(admin)/quizzes/[id]/results/page.tsx` (new) — the per-quiz
+  teacher results table: every session for that quiz (any status, not
+  just completed), newest-`started_at`-first, showing the student's full
+  name, score, correct/incorrect/unanswered/total, session status, and
+  completion time. Ownership is the same RLS-scoped `quizzes_select_own`
+  read every other `/quizzes/[id]/*` page already uses — another
+  teacher's quiz id comes back as no row, indistinguishable from a
+  nonexistent one, so no bespoke ownership check was needed. Reads the
+  persisted `score`/`correct_answers` columns directly (not
+  `computeResult`) plus one extra `responses` count query across every
+  session id on the page at once, to avoid an N+1 fan-out for a list.
+- `src/app/(admin)/results/page.tsx` (rewritten) — was a bare session
+  count; now a directory of the teacher's quizzes that have at least one
+  session, each linking to its `/quizzes/[id]/results` table. Session
+  counts come from one `quiz_sessions` read (RLS-scoped) grouped in
+  memory, not a query per quiz.
+- `src/app/(admin)/quizzes/[id]/page.tsx` (modified) — a "View results"
+  button now appears once a quiz is no longer a draft, linking to its
+  results page (previously that header slot only ever showed
+  edit/delete/publish controls, all draft-only).
+
+**Submission atomicity — reasoned about, not just asserted.** Double-
+click, refresh, duplicate requests, concurrent requests, and retry-after-
+failure were all considered: `submitQuiz` was already idempotent
+(Phase 7) for an already-`completed` session; the new question was
+whether *finalizing* (computing + writing a score) could itself race.
+It can't produce two different results, because `finalizeSession`'s CAS
+means only the first `UPDATE` to actually reach Postgres wins, and the
+result being written was computed from the same immutable `responses`
+snapshot any concurrent caller would also compute from any prior
+authenticated attempt. No RPC was created for this — inspected the
+existing RPC pattern (Phase 4/5's `security invoker` functions exist to
+keep a *multi-table* write — quiz counts plus questions plus answers —
+in one transaction) and this write touches exactly one table
+(`quiz_sessions`); a single `UPDATE` is already atomic, and the
+CAS filter is sufficient without wrapping anything in a function.
+
+**Expiration behavior — matches the task's own recommendation exactly.**
+`expired` and `completed` are distinct terminal states: a session that
+runs out of time without an explicit submit becomes `expired` (never
+silently treated as `completed`), but its result is still computed from
+whatever was saved — a student sees their real score either way, just
+under an "expired" heading and note instead of a "submitted" one. No
+further answers can be written once a session is in either terminal
+state (Phase 7's own guards, unchanged).
+
+**3. Real end-to-end verification performed (not just code review),
+using the same two-layer approach as Phase 7, against the real Supabase
+project:**
+
+- **Direct production-code integration tests** (45 assertions): the
+  actual `loadPlayableSession`/`submitAnswer`/`submitQuiz`/`startSession`
+  functions imported and run directly against the live database (same
+  `node --conditions=react-server` + `@/*`-alias-loader technique as
+  Phase 7). Every result-consistency case from the task was run for
+  real: 10/10 correct → 100%; 7 correct + 3 incorrect → 70%; 7 correct +
+  2 incorrect + 1 unanswered → 70%; 0 answered → 0%; an entirely
+  untouched session forced into expiry → correct=0, incorrect=0,
+  unanswered=total, 0%; a quiz mixing MC and True/False scored correctly
+  throughout; two sessions of the same quiz with genuinely different
+  (randomized) question orders both scored 100% on all-correct answers,
+  proving display order has no bearing on correctness; changing an
+  answer before submitting left exactly one `responses` row and scored
+  only the final selection; calling `submitQuiz` twice left `score`,
+  `correct_answers`, and `completed_at` byte-for-byte unchanged the
+  second time (a true no-op, not a silent recompute); loading a completed
+  session twice returned an identical result object; a session with 4 of
+  10 questions answered (3 correct, 1 incorrect) forced into expiry
+  scored deterministically (correct=3, incorrect=1, unanswered=6) and an
+  attempted post-expiry answer was rejected and did not count. Security:
+  a forged/unknown session token resolved to `not_found`; a second real
+  teacher account got zero rows reading the first teacher's quiz,
+  `quiz_sessions`, and `participants` directly via PostgREST (RLS, not
+  application code).
+- **Real-browser tests** (12 assertions, Chromium via a temporarily
+  installed `playwright`, never added to `package.json`): a student
+  answered one question correctly and one incorrectly, submitted, and
+  saw "Your Result" with the quiz title, "Jacob Cullen", a 50% score, and
+  correct/incorrect/unanswered labels with no `is_correct` string
+  anywhere on the page; reloading kept the identical result (no
+  re-opened player); the teacher then logged in for real, saw the quiz
+  listed at `/results`, and its `/quizzes/[id]/results` page showed the
+  same student's name, the same 50% score, and a "Completed" status —
+  the exact number produced by the exact same scoring code the student
+  saw, read back through the teacher's own RLS-scoped view.
+- **No secret or correctness leakage in the built client bundle**:
+  `.next/static` re-checked for `SUPABASE_SECRET_KEY` and
+  `GEMINI_API_KEY` — zero matches, as every prior phase. Also grepped
+  specifically for `is_correct` this phase (a new check, since Phase 8 is
+  the first phase whose whole job is "don't leak correctness") — the one
+  match found is pre-existing Phase 5 teacher-review-UI code (the
+  question editor's "which option is correct" preview, legitimately
+  teacher-only, RLS/auth-gated, unrelated to any Phase 7/8 file); no
+  student-facing type (`PlayableQuestion`, `PlayableAnswer`,
+  `ActiveSession`, `QuizResult`) has an `is_correct` field at all, and
+  every function that reads it (`scoring.ts`, `response-actions.ts`,
+  `quiz-session.ts`) is `server-only`/`"use server"`-guarded.
+- **Cleanup**: every temporary teacher/quiz/session created by both test
+  layers was deleted and independently re-verified gone
+  (`ilike('title','Phase 8%')` returned zero rows). While verifying the
+  project's final state, also found and removed one **leftover** account
+  from a Phase 7 test run (`phase7-expiry-...@example.com`) whose
+  `deleteUser()` call had silently failed at the time — caught only
+  because this phase's cleanup check queried `auth.users` directly rather
+  than trusting the earlier script's own success log. Confirmed
+  afterward: `auth.users`/`quizzes` contain only the one real pre-existing
+  account and its own "English" quiz; that quiz's own real
+  `participants`/`quiz_sessions`/`responses` rows (from the user's own
+  manual Phase 7 testing) were left untouched, as they should be — they
+  are not test data.
+
+**Validation:** `npx tsc --noEmit`, `npm run lint`, `npm run build`, and
+`npm run lint:sql` (all 8 migrations — unchanged this phase) all clean.
+`npx supabase migration list` confirms local/remote match (still 8, no
+new migration this phase).
+
+**Still not implemented — Phase 9 and later:** analytics dashboards,
+charts, per-question statistics, leaderboards, and anything beyond one
+student's own result and one teacher's per-quiz results table.

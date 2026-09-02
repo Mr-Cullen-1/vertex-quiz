@@ -1,7 +1,8 @@
 "use server";
 
 import { createAdminClient } from "@/lib/supabase/admin";
-import { isSessionExpired, markSessionExpired } from "./expiry";
+import { isSessionExpired } from "./expiry";
+import { finalizeSession } from "./scoring";
 
 export type ResponseActionResult =
   | { success: true }
@@ -21,6 +22,7 @@ type SessionForWrite = {
   status: string;
   expires_at: string;
   question_order: unknown;
+  total_questions: number;
 };
 
 async function loadSessionForWrite(
@@ -29,7 +31,7 @@ async function loadSessionForWrite(
 ): Promise<SessionForWrite | null> {
   const { data, error } = await admin
     .from("quiz_sessions")
-    .select("id, status, expires_at, question_order")
+    .select("id, status, expires_at, question_order, total_questions")
     .eq("session_token", sessionToken)
     .maybeSingle();
 
@@ -78,9 +80,7 @@ export async function submitAnswer(
   }
 
   if (isSessionExpired(session.expires_at)) {
-    if (session.status !== "expired") {
-      await markSessionExpired(admin, session.id);
-    }
+    await finalizeSession(admin, session.id, session.total_questions, "expired", new Date().toISOString());
     return { success: false, error: EXPIRED_ERROR, stale: true };
   }
 
@@ -128,14 +128,17 @@ export async function submitAnswer(
 }
 
 /**
- * Finalizes a session. Idempotent — calling it again on an already-
- * completed session is a no-op success, so a slow network retry or a
- * double-click can't error out a student who already submitted. Rejects if
- * the deadline has already passed: `expired` and `completed` are distinct
- * terminal states (see docs/database.md) — a student who let the timer run
- * out sees the expired state, not a submitted confirmation, exactly like
- * `submitAnswer`'s own expiry check. Does not compute or persist a score;
- * that's Phase 8 (see CLAUDE.md/product-spec).
+ * Finalizes a session by scoring it and marking it `completed`. Idempotent
+ * — calling it again on an already-completed session is a no-op success
+ * (the result was already computed and persisted by the call that actually
+ * completed it), so a slow network retry or a double-click can't produce a
+ * different result or error out a student who already submitted. Rejects
+ * if the deadline has already passed: `expired` and `completed` are
+ * distinct terminal states (see docs/database.md) — a student who let the
+ * timer run out sees the expired state (its result computed the same way,
+ * from whatever was saved), not a submitted confirmation, exactly like
+ * `submitAnswer`'s own expiry check. Scoring itself — and the double-
+ * submit/race safety — lives in `./scoring`'s `finalizeSession`.
  */
 export async function submitQuiz(sessionToken: string): Promise<ResponseActionResult> {
   const admin = createAdminClient();
@@ -149,21 +152,11 @@ export async function submitQuiz(sessionToken: string): Promise<ResponseActionRe
   }
 
   if (isSessionExpired(session.expires_at)) {
-    if (session.status !== "expired") {
-      await markSessionExpired(admin, session.id);
-    }
+    await finalizeSession(admin, session.id, session.total_questions, "expired", new Date().toISOString());
     return { success: false, error: EXPIRED_ERROR, stale: true };
   }
 
-  const { error } = await admin
-    .from("quiz_sessions")
-    .update({ status: "completed", completed_at: new Date().toISOString() })
-    .eq("id", session.id);
-
-  if (error) {
-    console.error("Failed to submit quiz session:", error.message);
-    return { success: false, error: GENERIC_ERROR, stale: false };
-  }
+  await finalizeSession(admin, session.id, session.total_questions, "completed", new Date().toISOString());
 
   return { success: true };
 }

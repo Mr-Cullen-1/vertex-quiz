@@ -212,7 +212,22 @@ constraint, with `is_correct` always computed server-side from the real
 `answers` row, never from the client. Details:
 [docs/database.md](./docs/database.md) → "service_role privileges".
 
-Full verification logs (Phase 1–7):
+**Phase 8 — no schema change, no privilege migration at all.**
+`quiz_sessions.score`/`.correct_answers` already existed from Phase 1 and
+sat unused until now; `service_role`'s Phase 7 `UPDATE` on `quiz_sessions`
+and `SELECT` on `responses`, plus `authenticated`'s Phase 2 `SELECT`
+grants scoped by Phase 1's RLS, were already exactly what scoring and a
+teacher results page need — checked live before writing any code, same
+discipline as every other phase, and confirmed sufficient rather than
+assumed. `src/lib/student/scoring.ts`'s `finalizeSession()` computes a
+result from `responses.is_correct` (never re-touching `answers`, never
+trusting the client) and persists it in one `UPDATE` guarded by a
+compare-and-swap on `status`, so a double submit or a submit racing an
+expiry detection can't produce two different results. Details:
+[docs/database.md](./docs/database.md) → "service_role privileges" and
+[docs/architecture.md](./docs/architecture.md) → "Scoring and results".
+
+Full verification logs (Phase 1–8):
 [docs/development-progress.md](./docs/development-progress.md).
 
 ## 7. Development rules
@@ -310,24 +325,26 @@ confirmation to continue.
 | 5 | Question review and editor | ✅ Done — approve/edit/add/delete/reorder, verified end-to-end |
 | 6 | Quiz publishing and student access | ✅ Done — publishing, access token, `/join/{token}`, participant + session creation; student entry/session folded in here too (an earlier version of this table listed that as a separate Phase 7 — see below) |
 | 7 | Student quiz player | ✅ Done — randomized per-session order, answer persistence, server-enforced timer, submit; verified end-to-end |
-| 8 | Results | Not started |
+| 8 | Scoring and results | ✅ Done — server-side scoring on submit/expiry, student result screen, teacher per-quiz results table; verified end-to-end |
 | 9 | Analytics | Not started |
 | 10 | Final MVP polish | Not started |
 
-**Current phase:** 7 (Student quiz player) — **complete**. A student who
-starts a session at `/join/{token}` now lands on a real quiz player at
-`/quiz/{session_token}`: questions and answer options are shuffled once
-per session and stay stable across refreshes, selecting an option
-persists it immediately (and can be changed before submitting), a
-countdown derived from the server's `expires_at` is enforced on every
-write (not just displayed), and a confirmed Submit locks the session and
-shows a confirmation. `service_role` needed a second scoped grant
-(`questions`/`answers`: `SELECT`; `quiz_sessions`: `UPDATE` added to its
-existing grants; `responses`: `SELECT, INSERT, UPDATE`) — reported with
-the exact minimal migration and applied. No scoring, correct-answer
-reveal, or results page — those are Phase 8.
-**Next phase:** 8 — Results (score computation from `responses`, a
-results view for students and/or teachers).
+**Current phase:** 8 (Scoring and results) — **complete**. Every session
+that ends — explicit submit or expiry — is scored server-side from its
+saved `responses` (never from anything the client sends) and the result
+is persisted onto `quiz_sessions.score`/`.correct_answers` — columns
+Phase 1 provisioned and left unused until now. A student sees their own
+result (score %, correct/incorrect/unanswered/total, their name, the quiz
+title) on the same `/quiz/{session_token}` route the moment their session
+ends. A teacher sees every student's result for a quiz they own at
+`/quizzes/[id]/results`, linked from a new `/results` directory and from
+the quiz detail page. Needed **zero** new migrations or grants — Phase 7
+had already granted everything scoring requires, and Phase 2's teacher
+grants plus Phase 1's RLS already covered the results page; this was
+verified live before writing any code, not assumed. No analytics,
+charts, or per-question breakdowns — those are Phase 9.
+**Next phase:** 9 — Analytics (quiz-level aggregates: participants,
+completion rate, average/high/low score).
 
 Note on the table above: an earlier version numbered "Student entry and
 session" as its own Phase 7 (folded into Phase 6 once the actual approved

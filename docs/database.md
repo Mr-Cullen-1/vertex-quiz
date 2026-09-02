@@ -26,8 +26,14 @@ table/column schema change** — `quiz_sessions.question_order` and the
 all provisioned in Phase 1 and, again, sat unused until Phase 7 finally
 wrote to them; `responses` also went from a fully unused table to the one
 Phase 7 reads and writes. It required its own privilege migration for the
-same reason as Phase 6 — see "service_role privileges" below. SQL
-migrations live under `supabase/migrations/`:
+same reason as Phase 6 — see "service_role privileges" below. **Phase 8
+(scoring + results) needed no migration at all** — `quiz_sessions.score`
+and `.correct_answers` (Phase 1, unused until now) were exactly the two
+values a result needs to persist, and the `service_role`/`authenticated`
+grants Phase 2/7 already applied were already sufficient for both writing
+a score and reading it back; this was verified live before writing any
+code, not assumed — see "service_role privileges" below. SQL migrations
+live under `supabase/migrations/`:
 
 - `20260829120000_create_core_schema.sql` — tables, indexes, constraints,
   triggers.
@@ -186,6 +192,18 @@ live after applying the migration: `service_role` has exactly SELECT on
 `quiz_sessions`, and SELECT+INSERT+UPDATE on `responses` — nothing more;
 `anon` unchanged (still zero non-REFERENCES/TRIGGER/TRUNCATE grants).
 
+**Phase 8 (scoring + results) — checked live, needed nothing new.**
+Before writing any code, re-ran the same `information_schema.
+role_table_grants` check `service_role` had after Phase 7: `UPDATE` on
+`quiz_sessions` and `SELECT` on `responses` were already there — exactly
+what computing and persisting a score requires (read the session's
+responses, write its score/correct_answers/status/completed_at). Also
+checked `authenticated`'s grants on `quiz_sessions`/`participants`/
+`responses` (all `SELECT`, from Phase 2) and their RLS policies
+(`*_select_own_quiz`, from Phase 1) — already exactly what a teacher
+results page needs, with ownership already enforced. No migration, no
+grant change, no RLS change for this entire phase.
+
 ## Principles
 
 - UUID primary keys (`gen_random_uuid()`, built into Postgres 13+ — no
@@ -322,8 +340,8 @@ Index: `participants (quiz_id)`.
 | started_at      | timestamptz | default `now()`                                                |
 | completed_at    | timestamptz | nullable; `CHECK (completed_at >= started_at)`                 |
 | expires_at      | timestamptz | not null — computed server-side from `quizzes.duration_minutes` |
-| score           | numeric(5,2)| nullable, `0–100`                                              |
-| correct_answers | int         | nullable, `>= 0`                                               |
+| score           | numeric(5,2)| nullable, `0–100`; the integer result percentage (Phase 8)     |
+| correct_answers | int         | nullable, `>= 0` (Phase 8)                                     |
 | total_questions | int         | not null, `>= 0`                                               |
 | created_at      | timestamptz | default `now()`                                                |
 
@@ -338,21 +356,29 @@ flow (a fresh random value each call, retried up to 3 times on the
 astronomically unlikely unique-constraint collision). `question_order`
 stays at its `[]` default and `status` is always inserted as `'started'`.
 
-**Phase 7** is what actually reads and writes the rest of this table.
-`src/lib/student/quiz-session.ts` persists this session's one-time
+**Phase 7** is what actually starts reading and writing the rest of this
+table. `src/lib/student/quiz-session.ts` persists this session's one-time
 question/answer shuffle into `question_order` the first time it's loaded
 (a jsonb object `{ questions: uuid[], answers: { [questionId]: uuid[] }
 }` — display order only, never changing which `answers` row is actually
 correct) and flips `status` from `started` to `in_progress` in the same
 statement, using a compare-and-swap on `status` so two racing requests
-can't each persist a different order. `src/lib/student/expiry.ts` flips
-`status` to `expired` (best effort) the first time anything discovers
-`expires_at` has passed while the session was `started`/`in_progress` —
-`expires_at`, not `status`, remains the actual authority checked on every
-read and write. `src/lib/student/response-actions.ts`'s `submitQuiz` sets
-`status = 'completed'` and `completed_at`. `score`/`correct_answers`
-remain unwritten — Phase 7 explicitly does not compute or persist a
-score; that's Phase 8.
+can't each persist a different order.
+
+**Phase 8** is what finally writes `score`/`correct_answers`, and is the
+only code that ever transitions `status` into a terminal value
+(`completed` or `expired`) or sets `completed_at`. Both transitions go
+through the same function — `src/lib/student/scoring.ts`'s
+`finalizeSession()` — whether triggered by an explicit `submitQuiz` call
+or by anything (`submitAnswer`, `submitQuiz`, or a page load via
+`loadPlayableSession`) discovering `expires_at` has passed. It computes
+the result from `responses` first, then writes `score`, `correct_answers`,
+`status`, and `completed_at` in one `UPDATE` guarded by
+`.in("status", ["started", "in_progress"])` — the same compare-and-swap
+shape as `question_order`'s, so a double submit or a submit racing an
+expiry detection can't each persist a different result. `expires_at`
+remains the actual authority for "is this session over" on every read
+and write — `status` only records the outcome.
 
 ### `responses`
 
@@ -959,3 +985,73 @@ confirmed all eight migrations in sync between local and remote.
   `participants`/`quiz_sessions`/`responses` all back to zero rows
   project-wide, and `auth.users`/`quizzes` back to only the one
   pre-existing real account and its own quiz.
+
+## Live verification — Phase 8 scoring and results (2026-09-02)
+
+No migration this phase (see "service_role privileges" above) — every
+check below confirms the *existing* `score`/`correct_answers` columns and
+the *existing* grants/RLS actually behave as scoring and results now
+require, using real Supabase data.
+
+- **Scoring correctness, all eleven consistency cases from the task,
+  against a real 10-question (5 MC + 5 TF) published quiz**: 10/10
+  correct → 100%; 7 correct + 3 incorrect → 70%; 7 correct + 2 incorrect
+  + 1 unanswered → 70%; a session with zero answers, submitted → 0%; a
+  wholly untouched session forced into expiry → `correct_answers = 0`,
+  0%, and every question counted unanswered; mixed MC/True-False scored
+  correctly throughout; two sessions with genuinely different (randomized,
+  confirmed different) question/answer orders both scored 100% on
+  all-correct answers, proving display position has no bearing on
+  correctness; changing an answer before submitting left exactly one
+  `responses` row (checked by a direct count) and the final selection was
+  what got scored; calling `submitQuiz` twice left `score`,
+  `correct_answers`, and `completed_at` identical the second time —
+  a real no-op, not a silent recompute; loading a completed session twice
+  returned byte-identical results; a session with 4 of 10 questions
+  answered (3 correct, 1 incorrect) forced into expiry scored
+  deterministically and a post-expiry answer attempt was rejected and did
+  not affect the result.
+- **`finalizeSession`'s compare-and-swap, proven by the double-submit
+  case above**, not just reasoned about: the second `submitQuiz` call
+  updated zero rows (status already `completed`) and fell back to its
+  read-only recompute path, which — because nothing about `responses`
+  could have changed in between — produced the exact same numbers the
+  first call had already persisted.
+- **Security, directly against the real database**: a forged/unknown
+  session token resolved to `not_found` from `loadPlayableSession`; a
+  second real teacher account's own authenticated client got zero rows
+  querying the first teacher's `quizzes`, `quiz_sessions`, and
+  `participants` rows directly via PostgREST — RLS, not application code,
+  is what's actually blocking it.
+- **Real teacher + student flow through the actual running app**
+  (Chromium): a student answered one question correctly and one
+  incorrectly, submitted, and the rendered result page showed the quiz
+  title, the student's full name, a 50% score, and correct/incorrect/
+  unanswered counts, with no `is_correct` string anywhere on the page;
+  reloading kept the identical result rather than re-opening the player.
+  The owning teacher then logged in for real, found the quiz listed at
+  `/results`, and its `/quizzes/[id]/results` page showed the same
+  student's name, the same 50% score, and a "Completed" status — the
+  teacher-side read of exactly what the student-side write had produced.
+- **No leakage in a fresh production build**: `.next/static` re-checked
+  for `SUPABASE_SECRET_KEY` and `GEMINI_API_KEY` — zero matches. Also
+  grepped for `is_correct` specifically this phase (new — Phase 8 is the
+  first phase whose entire job is not leaking correctness): one match,
+  traced to pre-existing Phase 5 teacher-review-UI code (the question
+  editor's own-quiz "which option is correct" preview) — legitimately
+  teacher-only and auth-gated, not part of any Phase 7/8 file, and no
+  student-facing type in this codebase (`PlayableQuestion`,
+  `PlayableAnswer`, `ActiveSession`, `QuizResult`) has an `is_correct`
+  field to begin with.
+- **Cleanup, and one pre-existing leak caught while doing it**: every
+  temporary teacher/quiz/session/response created by this phase's own
+  tests was deleted and independently re-verified gone. While confirming
+  the project's final state, a direct `auth.users` query (not a rerun of
+  any prior script) surfaced one **leftover** account from a Phase 7 test
+  run whose `deleteUser()` call had silently failed without the earlier
+  script checking its result — removed on the spot. `auth.users` and
+  `quizzes` now contain only the one real pre-existing account and its
+  own "English" quiz; that quiz's real `participants`/`quiz_sessions`/
+  `responses` rows (from the account owner's own manual Phase 7 testing)
+  were confirmed present and deliberately left untouched — they are the
+  project owner's real data, not test residue.

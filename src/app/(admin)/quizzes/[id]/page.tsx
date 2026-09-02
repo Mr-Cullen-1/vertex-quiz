@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ClipboardList, Pencil } from "lucide-react";
+import { BarChart3, ClipboardList, Pencil } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/server";
@@ -138,7 +138,19 @@ export default async function QuizDetailPage(
             <DeleteQuizButton quizId={quiz.id} quizTitle={quiz.title} />
             {readyForPublishing ? <PublishQuizButton quizId={quiz.id} /> : null}
           </div>
-        ) : null}
+        ) : (
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              nativeButton={false}
+              render={<Link href={`/quizzes/${quiz.id}/results`} />}
+            >
+              <BarChart3 className="size-4" />
+              View results
+            </Button>
+          </div>
+        )}
       </div>
 
       <div className="max-w-2xl rounded-xl bg-card p-6 ring-1 ring-foreground/10">

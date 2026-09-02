@@ -115,9 +115,10 @@ published ── student joins via /join/{access_code}, gets a session (Phase 6)
 A student's own `quiz_sessions.status` progresses independently of the
 quiz's `status` (which stays `published` throughout): `started` (Phase 6,
 on join) → `in_progress` (Phase 7, once the session's question order is
-generated) → `completed` (Phase 7, on submit) or `expired` (Phase 7, if
-`expires_at` passes before the student submits) — see "Student quiz
-player" below.
+generated) → `completed` (Phase 8, on submit — scored) or `expired`
+(Phase 8, if `expires_at` passes before the student submits — also
+scored, from whatever was saved) — see "Student quiz player" and
+"Scoring and results" below.
 
 "Ready for publishing" is intentionally **not** a `quizzes.status` value —
 it's computed (both on the review page and the quiz detail page) from
@@ -144,8 +145,17 @@ stable question/answer order; answer selection with change-before-submit;
 a server-enforced countdown; and final submit. It needed its own scoped
 `service_role` grant, found and applied the same way as Phase 6's — see
 "Student quiz player" below and [database.md](./database.md) →
-"service_role privileges". No scoring, results, or analytics — those are
-Phase 8+.
+"service_role privileges".
+
+**Phase 8 status: complete.** Every session that ends — by explicit
+submit or by expiry — is scored server-side from its saved `responses`
+and the result is persisted onto the same `quiz_sessions.score`/
+`.correct_answers` columns Phase 1 provisioned. Students see their own
+result on the same `/quiz/[sessionToken]` route; teachers see every
+result for a quiz they own at `/quizzes/[id]/results`. Needed **no**
+migration or grant change at all — see "Scoring and results" below and
+[database.md](./database.md) → "service_role privileges". No analytics,
+charts, or per-question breakdowns — those are Phase 9+.
 
 Phase 3 implements quiz metadata: a teacher creates a `quizzes` row with a
 title, optional description, a fixed `multiple_choice_count` /
@@ -542,11 +552,13 @@ submits (whether or not the clock was close to running out) is
 so a slow request can't sneak a late submission past the deadline; every
 `submitAnswer` call independently re-checks `expires_at` too, so the
 client's own countdown display is never the actual enforcement — it can
-lag or drift and the server still rejects the write. Both `quiz-
-session.ts` and `response-actions.ts` share one `isSessionExpired()`/
-`markSessionExpired()` helper (`src/lib/student/expiry.ts`) so this check
-and its "lazily record the expired status" side effect can't drift apart
-between the read path and the write path.
+lag or drift and the server still rejects the write. `quiz-session.ts`
+and `response-actions.ts` share one `isSessionExpired()` helper
+(`src/lib/student/expiry.ts`) for the check itself; what happens once a
+session is found expired — recording `status = 'expired'` and (Phase 8)
+scoring it from whatever was saved — is `src/lib/student/scoring.ts`'s
+`finalizeSession()`, called from both the read path and every write path
+so the two can't drift apart. See "Scoring and results" below.
 
 **The timer display is a refinement, not the enforcement.** `QuizPlayer`
 corrects for client/server clock skew using one server timestamp sampled
@@ -563,6 +575,94 @@ fixed, not suppressed, during Phase 7 (see development-progress.md).
 The player receives question/answer ids (needed to know what to submit)
 but never a quiz id, a teacher id, or the raw `quiz_sessions.id` — only
 the opaque `session_token` already in the URL.
+
+## Scoring and results (Phase 8)
+
+**Needed no migration or grant change at all.** `quiz_sessions.score`/
+`.correct_answers` were provisioned in Phase 1 and unused until now;
+`service_role`'s `UPDATE` on `quiz_sessions` and `SELECT` on `responses`
+(both from Phase 7), plus `authenticated`'s existing `SELECT` on
+`quiz_sessions`/`participants`/`responses` scoped by their Phase 1 RLS
+policies, were already exactly what scoring and a teacher results page
+need. Checked live before writing any code, same discipline as every
+grant decision in this project — see [database.md](./database.md) →
+"service_role privileges".
+
+```
+Session ends (explicit submit, or expiry discovered by any code path)
+  → src/lib/student/scoring.ts: finalizeSession(sessionId, totalQuestions, status, completedAt)
+      computeResult(): SELECT is_correct FROM responses WHERE session_id = ...
+        answered = count(*), correct = count(is_correct = true)
+        incorrect = answered - correct, unanswered = total - answered
+        scorePercentage = round(correct / total * 100)
+      UPDATE quiz_sessions SET score=…, correct_answers=…, status=…, completed_at=…
+        WHERE id = sessionId AND status IN ('started','in_progress')  -- compare-and-swap
+      0 rows updated? another call already finalized this session —
+        recompute fresh from responses instead of trusting a pre-race snapshot
+  → student sees the result immediately (loadPlayableSession's completed/
+    expired branches now carry a QuizResult)
+  → teacher sees it later at /quizzes/[id]/results, reading the persisted
+    score/correct_answers columns directly (no responses re-computation
+    needed per row — see below)
+```
+
+**`responses.is_correct` is the only thing ever read to score a session
+— never `answers` again, and never anything the client sends.** Each
+response's correctness was already resolved against the real `answers`
+row, by id, at the moment the student selected it (Phase 7); Phase 8
+simply counts what's already there. This is also why the randomized
+on-screen answer position from Phase 7 can never affect a score: nothing
+about display order is part of `responses` at all.
+
+**One result, computed the same way everywhere it's shown — with one
+deliberate exception for scale.** `computeResult()` is the single
+function that turns `responses` into a `QuizResult`, and both the student
+result screen and `finalizeSession`'s persistence call it. The teacher
+results *list* (`/quizzes/[id]/results`) is the one place that reads the
+persisted `quiz_sessions.score`/`.correct_answers` columns directly
+instead — recomputing from `responses` for every session in a table would
+mean a query per row; reading the two columns Phase 8 already persisted,
+plus one bulk `responses` count query across every session id on the
+page for `unanswered`/`incorrect`, keeps it to a fixed number of queries
+regardless of how many students took the quiz.
+
+**Finalization is a compare-and-swap, not a transaction or a new RPC.**
+`finalizeSession`'s `UPDATE ... WHERE status IN ('started', 'in_progress')`
+means only the first caller to actually reach Postgres can transition a
+session to a terminal state; every other caller (a double submit, a
+submit racing an expiry detection, a retried request after a dropped
+connection) matches zero rows and falls back to recomputing fresh from
+`responses` — which is guaranteed to produce the identical result, since
+no write path ever touches `responses` once `status` has left
+`started`/`in_progress`. An RPC (the pattern Phase 4/5 used for
+`create_quiz_questions`/`add_quiz_question`/etc.) was considered and
+rejected: those exist to keep a genuinely multi-table write — quiz counts
+plus questions plus answers — inside one transaction; this write touches
+exactly one table (`quiz_sessions`), so a single guarded `UPDATE` is
+already atomic on its own.
+
+**Expired and completed are distinct outcomes, and both get a real
+score.** A session that runs out of time without an explicit submit
+becomes `expired`, not `completed` — but `finalizeSession` scores it
+exactly the same way, from whatever was saved before the deadline. The
+student result screen shows the same score/breakdown either way, just
+under a different heading ("Your Result" vs. "Time's up") — matching the
+task's own recommendation that an expired session's result should still
+be determinable and shown, not withheld.
+
+**The student result screen shows only what the product spec allows.**
+Quiz title, the student's full name, the score percentage, and
+correct/incorrect/unanswered/total counts — never which specific answers
+were right or wrong, never correct-answer text, never an internal id.
+`PlayableQuestion`/`PlayableAnswer`/`ActiveSession`/`QuizResult` — every
+type this phase's code returns toward the client — has no `is_correct`
+field at all; there's nothing to accidentally serialize.
+
+**The teacher results page reuses the exact ownership pattern every
+other `/quizzes/[id]/*` page already has.** A plain RLS-scoped read of
+the quiz by id (`quizzes_select_own`) — another teacher's quiz id comes
+back as no row, indistinguishable from a nonexistent one — gates the
+whole page; no new ownership check, RPC, or policy was needed.
 
 ## Data-loading errors
 
@@ -624,8 +724,10 @@ underlying `answers` rows, and which one is correct, never change.
 `submitAnswer` (Phase 7) resolves a submitted `selected_answer_id` against
 the real `answers` table itself on every write, computing `is_correct`
 there — never from `question_order`, and never from anything the client
-sends. Per-response correctness is recorded this way starting in Phase 7;
-aggregate scoring from those responses is Phase 8.
+sends. Aggregate scoring (Phase 8, `src/lib/student/scoring.ts`) only
+ever reads that already-resolved `responses.is_correct` — it never
+touches `answers` again — so the randomized display order from Phase 7
+has no path by which it could reach a score.
 
 ## Availability and timing enforcement
 
@@ -637,10 +739,12 @@ time; `quiz_sessions.expires_at` is computed once, at that point, from
 `duration_minutes` → `ends_at` → a 24h fallback, and stored — it is not
 recomputed later. (2) Phase 7 — every mutation on an existing session
 (`submitAnswer`, `submitQuiz`) independently re-checks that stored
-`expires_at` against the current time before writing anything, lazily
-recording an `expired` status the first time a check catches it past due
-(`src/lib/student/expiry.ts`). Neither point trusts a client-reported
-timer; the countdown a student sees is a display only (see "Student quiz
+`expires_at` against the current time before writing anything
+(`src/lib/student/expiry.ts`'s `isSessionExpired()`); a check that catches
+a session past due triggers Phase 8's `finalizeSession()`, which records
+the `expired` status and its score in the same write. Neither point
+trusts a client-reported timer; the countdown a student sees is a display
+only (see "Student quiz
 player" above).
 
 ## Directory structure (grows per phase)
@@ -663,16 +767,17 @@ src/
           edit/                 Phase 3 — edit-quiz form (pre-filled)
           review/                 Phase 5 — question review/edit/add/delete/reorder
             _components/            question-list/-card.tsx, question-editor-dialog.tsx, add-question-button.tsx
+          results/                Phase 8 — per-quiz teacher results table
           _components/          delete-quiz-button.tsx, pdf-generation-panel.tsx (Phase 4),
                                  publish-quiz-button.tsx, student-access-link.tsx (Phase 6)
         _components/          quiz-form.tsx — shared create/edit form
-      results/              Empty-state shell, Phase 8/9 fill it in
+      results/              Phase 8 — directory of quizzes with results, linking into each's own results table
       settings/             Read-only account info (real profile data)
       _components/          Sidebar, Header, StatCard, mobile nav (Sheet-based)
     (student)/               Public, no auth, no admin chrome
       join/[token]/            Phase 6 — validate token, show quiz info, collect name, start a session
         _components/             join-form.tsx
-      quiz/[sessionToken]/     Phase 7 — the real student quiz player
+      quiz/[sessionToken]/     Phase 7 player + Phase 8 result screen
         _components/             quiz-player.tsx
   components/
     ui/                   shadcn/ui primitives
@@ -697,9 +802,10 @@ src/
       access.ts                 Phase 6 — loadPublishedQuizByToken (service-role client)
       join-actions.ts             Phase 6 — startSession (participant + quiz_session creation)
       shuffle.ts                    Phase 7 — crypto.randomInt Fisher-Yates
-      expiry.ts                      Phase 7 — isSessionExpired/markSessionExpired, shared by the two files below
-      quiz-session.ts                  Phase 7 — loadPlayableSession (session state + per-session shuffle)
-      response-actions.ts                Phase 7 — submitAnswer/submitQuiz
+      expiry.ts                      Phase 7 — isSessionExpired, shared by the two files below
+      scoring.ts                      Phase 8 — computeResult/finalizeSession
+      quiz-session.ts                  Phase 7/8 — loadPlayableSession (session state, shuffle, and result)
+      response-actions.ts                Phase 7/8 — submitAnswer/submitQuiz (submitQuiz now scores via finalizeSession)
     gemini/
       client.ts               Phase 4 — server-only GoogleGenAI client
       prompt.ts                Phase 4 — extraction prompt builder
@@ -713,7 +819,7 @@ src/
       assert-no-error.ts       Phase 2 — throw-on-Supabase-error helper
   proxy.ts                 Phase 1/2 — session refresh + optimistic redirects
 supabase/
-  migrations/              Phase 1–7 — SQL schema + RLS + grants + Storage + RPC, via Supabase CLI
+  migrations/              Phase 1–7 — SQL schema + RLS + grants + Storage + RPC, via Supabase CLI (Phase 8 added no migration)
 docs/                     Reference documentation (this directory)
 ```
 
