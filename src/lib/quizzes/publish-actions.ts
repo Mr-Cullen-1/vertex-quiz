@@ -106,27 +106,46 @@ export async function publishQuiz(quizId: string): Promise<PublishQuizResult> {
   }
 
   for (let attempt = 1; attempt <= MAX_ACCESS_TOKEN_ATTEMPTS; attempt++) {
-    const { error: updateError } = await supabase
+    // `.eq("status", "draft")` makes this a compare-and-swap: without it,
+    // two concurrent publish attempts (two tabs, a double-click) could both
+    // pass the `loadOwnedDraftQuiz` read above and both issue this UPDATE,
+    // with the second silently overwriting the first's `access_code` —
+    // invalidating a join link that may already be in a student's hands.
+    const { data: published, error: updateError } = await supabase
       .from("quizzes")
       .update({
         status: "published",
         published_at: new Date().toISOString(),
         access_code: generateAccessToken(),
       })
-      .eq("id", quizId);
+      .eq("id", quizId)
+      .eq("status", "draft")
+      .select("id")
+      .maybeSingle();
 
-    if (!updateError) {
+    if (updateError) {
+      // 24 random bytes leaves collision probability astronomically low —
+      // this loop is a defensive backstop, not an expected path.
+      const isUniqueViolation =
+        updateError.code === "23505" || updateError.message.includes("access_code");
+      if (!isUniqueViolation || attempt === MAX_ACCESS_TOKEN_ATTEMPTS) {
+        console.error("Failed to publish quiz:", updateError.message);
+        return { success: false, error: "Failed to publish the quiz. Please try again." };
+      }
+      continue;
+    }
+
+    if (published) {
       return { success: true };
     }
 
-    // 24 random bytes leaves collision probability astronomically low —
-    // this loop is a defensive backstop, not an expected path.
-    const isUniqueViolation =
-      updateError.code === "23505" || updateError.message.includes("access_code");
-    if (!isUniqueViolation || attempt === MAX_ACCESS_TOKEN_ATTEMPTS) {
-      console.error("Failed to publish quiz:", updateError.message);
-      return { success: false, error: "Failed to publish the quiz. Please try again." };
-    }
+    // The CAS matched zero rows: another request already moved this quiz
+    // off `draft` (e.g. a race with a second tab) — retrying with a new
+    // token would not help, since it's not a token collision.
+    return {
+      success: false,
+      error: "This quiz was already published. Refresh the page to see it.",
+    };
   }
 
   return { success: false, error: "Failed to publish the quiz. Please try again." };

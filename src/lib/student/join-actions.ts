@@ -14,10 +14,19 @@ const MAX_SESSION_TOKEN_ATTEMPTS = 3;
 /**
  * Falls back to a sane cap when the quiz has neither a per-session time
  * limit nor a deadline, so `quiz_sessions.expires_at` (not nullable) is
- * never left meaning "forever." Phase 6 only stores this — the actual
- * countdown/expiry enforcement against student answers is Phase 7.
+ * never left meaning "forever." Originally a 24-hour cap meant to read as
+ * "effectively unlimited," but that produced a genuinely confusing
+ * countdown for the student (a huge, seemingly-arbitrary remaining time)
+ * with no way for the player UI to tell "this is the no-limit fallback"
+ * apart from "this quiz really does have ~a day left." 20 minutes is a
+ * normal, understandable quiz-taking window and matches what a teacher
+ * who forgot to set a limit most likely intended. A deliberate default
+ * change, not just a display fix — but no schema/migration, no change to
+ * existing rows, and it only affects sessions created after this deploy. A
+ * quiz's `duration_minutes`/`ends_at` should still be set explicitly
+ * whenever a specific window matters.
  */
-const NO_LIMIT_FALLBACK_MS = 24 * 60 * 60 * 1000;
+const NO_LIMIT_FALLBACK_MS = 20 * 60 * 1000;
 
 function computeExpiresAt(
   startedAt: Date,

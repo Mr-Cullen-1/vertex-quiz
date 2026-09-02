@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/server";
 import { assertNoError } from "@/lib/supabase/assert-no-error";
 import { getEnv } from "@/lib/env";
+import { QUIZ_STATUS_LABEL } from "@/lib/quizzes/status";
 import { DeleteQuizButton } from "./_components/delete-quiz-button";
 import { PdfGenerationPanel } from "./_components/pdf-generation-panel";
 import { PublishQuizButton } from "./_components/publish-quiz-button";
@@ -26,12 +27,6 @@ type QuizDetail = {
   published_at: string | null;
   access_code: string | null;
   source_pdf_path: string | null;
-};
-
-const STATUS_LABEL: Record<QuizDetail["status"], string> = {
-  draft: "Draft",
-  published: "Published",
-  closed: "Closed",
 };
 
 function formatDateTime(iso: string): string {
@@ -115,7 +110,7 @@ export default async function QuizDetailPage(
             <h2 className="text-xl font-semibold text-foreground">
               {quiz.title}
             </h2>
-            <Badge variant="secondary">{STATUS_LABEL[quiz.status]}</Badge>
+            <Badge variant="secondary">{QUIZ_STATUS_LABEL[quiz.status]}</Badge>
           </div>
           {quiz.description ? (
             <p className="max-w-xl text-sm text-muted-foreground">

@@ -167,7 +167,7 @@ export function QuestionList({
                 </AlertDialogHeader>
                 <AlertDialogFooter>
                   <AlertDialogCancel>Cancel</AlertDialogCancel>
-                  <AlertDialogAction className="w-full" onClick={handleApproveSelected}>
+                  <AlertDialogAction onClick={handleApproveSelected}>
                     Approve selected
                   </AlertDialogAction>
                 </AlertDialogFooter>
@@ -194,7 +194,7 @@ export function QuestionList({
               </AlertDialogHeader>
               <AlertDialogFooter>
                 <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction className="w-full" onClick={handleApproveAll}>
+                <AlertDialogAction onClick={handleApproveAll}>
                   Approve all
                 </AlertDialogAction>
               </AlertDialogFooter>

@@ -4,18 +4,13 @@ import { BarChart3 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { createClient } from "@/lib/supabase/server";
 import { assertNoError } from "@/lib/supabase/assert-no-error";
+import { QUIZ_STATUS_LABEL, type QuizStatus } from "@/lib/quizzes/status";
 
 export const metadata: Metadata = {
   title: "Results — Vertex Quiz",
 };
 
-type Quiz = { id: string; title: string; status: "draft" | "published" | "closed" };
-
-const STATUS_LABEL: Record<Quiz["status"], string> = {
-  draft: "Draft",
-  published: "Published",
-  closed: "Closed",
-};
+type Quiz = { id: string; title: string; status: QuizStatus };
 
 /**
  * A directory into each quiz's own results table
@@ -77,7 +72,7 @@ export default async function ResultsPage() {
                     </p>
                   </div>
                   <Badge variant="secondary" className="shrink-0">
-                    {STATUS_LABEL[quiz.status]}
+                    {QUIZ_STATUS_LABEL[quiz.status]}
                   </Badge>
                 </Link>
               </li>

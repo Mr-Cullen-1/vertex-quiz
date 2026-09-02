@@ -169,11 +169,7 @@ export function PdfGenerationPanel({
               </AlertDialogHeader>
               <AlertDialogFooter>
                 <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction
-                  variant="destructive"
-                  className="w-full"
-                  onClick={handleClear}
-                >
+                <AlertDialogAction variant="destructive" onClick={handleClear}>
                   Clear questions
                 </AlertDialogAction>
               </AlertDialogFooter>

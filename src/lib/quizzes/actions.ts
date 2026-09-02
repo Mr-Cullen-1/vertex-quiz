@@ -126,7 +126,11 @@ export async function updateQuiz(
   const { title, description, multipleChoiceCount, trueFalseCount, durationMinutes, deadline } =
     parsed.data;
 
-  const { error } = await supabase
+  // `.eq("status", "draft")` turns the check-above/act-here pair into a
+  // compare-and-swap: without it, a quiz published (e.g. from another tab)
+  // in the moment between the read above and this write could still have
+  // its question composition silently edited after going live.
+  const { data: updated, error } = await supabase
     .from("quizzes")
     .update({
       title,
@@ -137,10 +141,16 @@ export async function updateQuiz(
       duration_minutes: durationMinutes ?? null,
       ends_at: deadline ? new Date(deadline).toISOString() : null,
     })
-    .eq("id", quizId);
+    .eq("id", quizId)
+    .eq("status", "draft")
+    .select("id")
+    .maybeSingle();
 
   if (error) {
     return { error: friendlyDbError(error.message) };
+  }
+  if (!updated) {
+    return { error: "This quiz is no longer a draft — it may have just been published." };
   }
 
   redirect(`/quizzes/${quizId}`);
@@ -170,9 +180,22 @@ export async function deleteQuiz(quizId: string) {
     throw new Error("Only draft quizzes can be deleted.");
   }
 
-  const { error } = await supabase.from("quizzes").delete().eq("id", quizId);
+  // Same compare-and-swap reasoning as `updateQuiz`: `.eq("status", "draft")`
+  // stops a quiz published in between the read above and this delete from
+  // being deleted anyway.
+  const { data: deleted, error } = await supabase
+    .from("quizzes")
+    .delete()
+    .eq("id", quizId)
+    .eq("status", "draft")
+    .select("id")
+    .maybeSingle();
+
   if (error) {
     throw new Error(`Failed to delete quiz: ${error.message}`);
+  }
+  if (!deleted) {
+    throw new Error("This quiz is no longer a draft and can't be deleted.");
   }
 
   redirect("/quizzes");

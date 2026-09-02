@@ -41,11 +41,7 @@ export function DeleteQuizButton({
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
           <form action={deleteQuiz.bind(null, quizId)}>
-            <AlertDialogAction
-              type="submit"
-              variant="destructive"
-              className="w-full"
-            >
+            <AlertDialogAction type="submit" variant="destructive">
               Delete
             </AlertDialogAction>
           </form>

@@ -148,7 +148,14 @@ function AlertDialogAction({
   return (
     <Button
       data-slot="alert-dialog-action"
-      className={cn(className)}
+      // Full width when the footer stacks (mobile), natural width when it
+      // becomes a row (`sm:` and up, matching AlertDialogFooter's own
+      // breakpoint) — the default for every alert dialog action, so a
+      // caller never needs to (and shouldn't) pass its own width override.
+      // A stray `w-full` from a caller still resolves correctly here,
+      // since `sm:w-auto` only takes effect at `sm:` and up regardless of
+      // class order.
+      className={cn("w-full sm:w-auto", className)}
       {...props}
     />
   )
@@ -164,7 +171,7 @@ function AlertDialogCancel({
   return (
     <AlertDialogPrimitive.Close
       data-slot="alert-dialog-cancel"
-      className={cn(className)}
+      className={cn("w-full sm:w-auto", className)}
       render={<Button variant={variant} size={size} />}
       {...props}
     />

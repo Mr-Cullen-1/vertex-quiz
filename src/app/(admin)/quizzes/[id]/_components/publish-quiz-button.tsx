@@ -58,7 +58,7 @@ export function PublishQuizButton({ quizId }: { quizId: string }) {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction className="w-full" onClick={handlePublish}>
+            <AlertDialogAction onClick={handlePublish}>
               Publish
             </AlertDialogAction>
           </AlertDialogFooter>

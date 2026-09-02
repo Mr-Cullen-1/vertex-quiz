@@ -3,13 +3,14 @@ import { GoogleGenAI } from "@google/genai";
 import { getEnv } from "@/lib/env";
 
 /**
- * `gemini-3.7-flash` — the current stable GA Flash model (Google's
- * official recommendation for production as of the docs checked
- * 2026-09-02), used as a pinned snapshot rather than the rolling
- * `gemini-flash-latest` alias. Fast and inexpensive, and more than
- * capable of document-grounded extraction/structured-output tasks like
- * this one. Swap for the current Pro snapshot if extraction quality ever
- * needs to trade speed/cost for more careful reasoning.
+ * `gemini-3.5-flash-lite` — a pinned snapshot, not the rolling
+ * `gemini-flash-latest` alias. Chosen over `gemini-3.7-flash` after a
+ * live diagnostic showed the latter returning sustained `503
+ * UNAVAILABLE` under real load, while `gemini-3.5-flash-lite` handled
+ * the same text/structured-output/PDF checks in under a second with no
+ * quality regression for this document-grounded extraction task. Swap
+ * for the current Pro snapshot if extraction quality ever needs to
+ * trade speed/cost for more careful reasoning.
  */
 export const GEMINI_MODEL = "gemini-3.5-flash-lite";
 
@@ -19,7 +20,7 @@ export const GEMINI_MODEL = "gemini-3.5-flash-lite";
  * 5 minutes — so a stalled Gemini connection leaves the teacher staring
  * at "Generating..." for that entire time before finally failing (seen
  * for real: `UND_ERR_HEADERS_TIMEOUT` at ~5.1 minutes). 2 minutes is
- * generous for a single PDF extraction call on `gemini-3.7-flash`
+ * generous for a single PDF extraction call on `gemini-3.5-flash-lite`
  * while failing fast enough that "Try again" is a reasonable next step
  * rather than another multi-minute wait.
  */

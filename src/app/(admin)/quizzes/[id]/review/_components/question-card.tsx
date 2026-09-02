@@ -189,7 +189,7 @@ export function QuestionCard({
               </AlertDialogHeader>
               <AlertDialogFooter>
                 <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction variant="destructive" className="w-full" onClick={handleDelete}>
+                <AlertDialogAction variant="destructive" onClick={handleDelete}>
                   Delete
                 </AlertDialogAction>
               </AlertDialogFooter>

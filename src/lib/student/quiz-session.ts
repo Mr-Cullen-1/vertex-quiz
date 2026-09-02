@@ -42,8 +42,20 @@ export type ActiveSession = {
 
 export type SessionView =
   | { state: "not_found" }
-  | { state: "expired"; quizTitle: string; participantName: string; result: QuizResult }
-  | { state: "completed"; quizTitle: string; participantName: string; result: QuizResult }
+  | {
+      state: "expired";
+      quizTitle: string;
+      quizDescription: string | null;
+      participantName: string;
+      result: QuizResult;
+    }
+  | {
+      state: "completed";
+      quizTitle: string;
+      quizDescription: string | null;
+      participantName: string;
+      result: QuizResult;
+    }
   | { state: "active"; session: ActiveSession };
 
 type SessionRow = {
@@ -53,7 +65,7 @@ type SessionRow = {
   expires_at: string;
   question_order: unknown;
   total_questions: number;
-  quizzes: { title: string; status: string } | null;
+  quizzes: { title: string; status: string; description: string | null } | null;
   participants: { first_name: string; last_name: string } | null;
 };
 
@@ -156,7 +168,7 @@ export async function loadPlayableSession(sessionToken: string): Promise<Session
   const { data: session, error } = await admin
     .from("quiz_sessions")
     .select(
-      "id, quiz_id, status, expires_at, question_order, total_questions, quizzes(title, status), participants(first_name, last_name)"
+      "id, quiz_id, status, expires_at, question_order, total_questions, quizzes(title, status, description), participants(first_name, last_name)"
     )
     .eq("session_token", sessionToken)
     .maybeSingle()
@@ -171,6 +183,7 @@ export async function loadPlayableSession(sessionToken: string): Promise<Session
   }
 
   const quizTitle = session.quizzes.title;
+  const quizDescription = session.quizzes.description;
   const participantFirstName = session.participants?.first_name ?? "Student";
   const participantName = session.participants
     ? `${session.participants.first_name} ${session.participants.last_name}`
@@ -178,7 +191,7 @@ export async function loadPlayableSession(sessionToken: string): Promise<Session
 
   if (session.status === "completed") {
     const result = await computeResult(admin, session.id, session.total_questions);
-    return { state: "completed", quizTitle, participantName, result };
+    return { state: "completed", quizTitle, quizDescription, participantName, result };
   }
 
   if (isSessionExpired(session.expires_at)) {
@@ -189,7 +202,7 @@ export async function loadPlayableSession(sessionToken: string): Promise<Session
       "expired",
       new Date().toISOString()
     );
-    return { state: "expired", quizTitle, participantName, result };
+    return { state: "expired", quizTitle, quizDescription, participantName, result };
   }
 
   let order = parseQuestionOrder(session.question_order);
