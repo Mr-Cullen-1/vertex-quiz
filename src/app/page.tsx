@@ -82,7 +82,7 @@ export default function Home() {
       <main className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-16 px-6 py-16">
         <section className="flex flex-col gap-4">
           <Badge variant="outline" className="w-fit text-muted-foreground">
-            Building in progress — Phase 0
+            AI-drafted, teacher-approved
           </Badge>
           <h1 className="max-w-2xl text-4xl font-semibold tracking-tight text-foreground sm:text-5xl">
             Turn a PDF into a quiz your students can take in minutes.
@@ -112,7 +112,7 @@ export default function Home() {
       <footer className="border-t border-border">
         <div className="mx-auto flex w-full max-w-5xl items-center justify-between px-6 py-5 text-xs text-muted-foreground">
           <span>© {new Date().getFullYear()} Vertex Studio</span>
-          <span>MVP under active development</span>
+          <span>Teachers sign in from the login page to get started.</span>
         </div>
       </footer>
     </div>

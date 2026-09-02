@@ -100,7 +100,11 @@ export default async function QuestionReviewPage(
           <div className="mt-4 flex items-center gap-2 rounded-lg bg-success/10 px-4 py-3 text-sm font-medium text-success">
             <CheckCircle2 className="size-4.5 shrink-0" />
             Ready for publishing — every question has been reviewed and
-            approved. Publishing itself arrives in a later phase.
+            approved.{" "}
+            <Link href={`/quizzes/${quiz.id}`} className="underline underline-offset-2">
+              Publish it from the quiz page
+            </Link>
+            .
           </div>
         ) : null}
       </div>

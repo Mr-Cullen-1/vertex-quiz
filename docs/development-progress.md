@@ -1808,3 +1808,172 @@ project:**
 analytics, charts beyond the plain bar visualization, leaderboards,
 CSV/export, live mode, and anything else outside one quiz's own
 aggregate view.
+
+---
+
+## Phase 10 — Final MVP audit and polish ✅
+
+**Date:** 2026-09-02
+
+**Goal:** audit the completed MVP (Phases 0–9) end to end and fix genuine
+bugs/gaps found — explicitly not a feature phase. No schema, grant, or
+scoring-formula change was expected or made.
+
+**1. Audit method.** Read every doc (`CLAUDE.md`, `README.md`,
+`docs/product-spec.md`, `docs/architecture.md`, `docs/database.md`,
+`docs/development-progress.md`) and re-verified live database state
+first. Then ran four focused, parallel read-only audits covering: (a)
+every route's auth/ownership/loading/error/empty/invalid-id handling,
+(b) security — secret exposure, admin-client import discipline, live
+`anon`/`service_role` grants, RLS, and a Server Action ownership
+spot-check, (c) dependency and dead-code cleanup — unused packages,
+`console.log`/`debugger`/TODO sweep, stale phase-leftover copy, duplicate
+helpers, (d) responsive/accessibility/brand consistency across the
+teacher and student surfaces. Also independently re-verified, by reading
+the actual code (not from memory): the deadline-vs-session-expiry
+distinction the task specifically asked about (`startSession` rejects new
+sessions once `quizzes.ends_at` has passed, via `loadPublishedQuizByToken`;
+an already-started session's `expires_at` is computed once, from
+`duration_minutes` alone when set, and is never re-capped by the deadline
+afterward) — confirmed already correct, exactly matching the task's own
+worked example (a session started 5 minutes before an 18:00 deadline with
+a 20-minute limit correctly runs until 18:15). No fix needed there.
+
+**2. Real bugs and gaps found and fixed:**
+
+- **No branded 404 anywhere.** Every `notFound()` call across
+  `/quizzes/[id]*` (a nonexistent or another teacher's quiz id — the two
+  are deliberately indistinguishable) fell through to Next's generic
+  unstyled 404. Added `src/app/not-found.tsx` — one shared, identity-
+  agnostic Vertex-branded page (it can be reached by a teacher, a
+  logged-out visitor, or a student, so it never assumes which).
+- **No error boundary for the student-facing flow at all.** Only
+  `(admin)/error.tsx` existed; an unhandled exception in `/join/[token]`
+  or `/quiz/[sessionToken]` — the actual exam-taking surface, and the
+  worst place for this to happen — surfaced Next's default unstyled error
+  UI. Added `src/app/(student)/error.tsx`, matching the existing
+  join/quiz pages' own status-card styling.
+- **No root error boundary.** `/` and `/login` had no error boundary at
+  all (only `(admin)` did). Added `src/app/error.tsx` for those, plus
+  `src/app/global-error.tsx` as the last-resort boundary for an error in
+  the root layout itself (necessarily minimal/dependency-free, since it
+  replaces the root layout — including the design-system imports that
+  could themselves be what failed).
+- **Factually stale, user-facing copy.** The question review page told
+  every teacher "Publishing itself arrives in a later phase" directly
+  underneath the ready-to-publish banner — false since Phase 6, and
+  actively misleading (a teacher reading that sentence would look for a
+  publish control that already exists one click away). Changed it to
+  link to the quiz page, where Publish actually lives
+  (`src/app/(admin)/quizzes/[id]/review/page.tsx`). The public landing
+  page (`src/app/page.tsx`) still read "Building in progress — Phase 0"
+  and "MVP under active development" — leftover Phase 0 scaffolding text;
+  replaced with copy that doesn't reference internal phase numbers.
+- **A real mobile tap-target defect in the primary student flow.** The
+  quiz player's "jump to question" dots
+  (`src/app/(student)/quiz/[sessionToken]/_components/quiz-player.tsx`)
+  were 28×28px with 6px gaps — the worst tap target in the whole app,
+  on the one screen every student uses. Sized up to 36×36px with more
+  breathing room between them.
+- **A cramped mobile layout on the analytics question cards.** The
+  4-column correct/incorrect/unanswered/success-rate stat grid
+  (`analytics/_components/question-performance.tsx`) had no responsive
+  step-down, squeezing four labeled stats into ~375px. Changed to
+  `grid-cols-2 sm:grid-cols-4`, matching the pattern the analytics
+  overview's own metric cards already use.
+- **One log-hygiene inconsistency.** `(admin)/error.tsx` logged the raw
+  `Error` object (`console.error(error)`) instead of `.message`, unlike
+  every other error-logging call site in the codebase. Normalized it —
+  no secrets were ever at risk (it's the generic error boundary, not a
+  data-access path), just inconsistent with the rest of the codebase's
+  own established convention.
+
+**3. Findings investigated and deliberately left alone (not bugs, or not
+worth the risk/value tradeoff this phase):**
+
+- The teacher-only question review screen's reorder/edit/delete icon
+  buttons (24–28px) are also under the ideal mobile tap-target size, but
+  that screen is a content-editing task realistically done at a desk;
+  enlarging a tightly-packed row of stacked icon buttons without being
+  able to visually verify the result carried more layout risk than the
+  fix was worth this phase — flagged for a future pass instead of changed
+  blind.
+- `shadcn` (the CSS package, resolved via `@import "shadcn/tailwind.css"`
+  in `globals.css`) sits in `dependencies` rather than `devDependencies`;
+  technically a devDependency, but moving it is a pure package-list
+  reclassification with no functional effect on this project's actual
+  deployment target (Vercel installs both lists before building) — no
+  bug to fix, left as-is rather than touched without a real reason.
+  `tw-animate-css` has the identical situation and was left alone for the
+  same reason.
+- Four independent `formatDateTime`/`formatDate` implementations (join
+  page, quiz detail page, results page, quizzes list) are genuine, minor
+  duplication but each is small, correct, and already shipped — extracting
+  a shared helper is a real but non-urgent cleanup, not a bug, so it was
+  left alone per this phase's explicit "do not perform broad refactoring"
+  scope.
+- No unused dependencies, no `console.log`/`debugger` statements, and no
+  TODO/FIXME/XXX/HACK comments were found anywhere in `src/` — confirmed
+  clean, nothing to remove.
+- `generate-actions.ts` logging up to 500 characters of raw Gemini output
+  on a schema-validation failure is quiz content, not a secret — noted,
+  not changed.
+
+**4. Security re-verification (no drift found from any prior phase):**
+`anon` still has zero real grants on any table; `service_role`'s grants
+exactly match `docs/database.md`'s documented state
+(`quizzes`/`questions`/`answers`: `SELECT`; `participants`: `SELECT,
+INSERT`; `quiz_sessions`/`responses`: `SELECT, INSERT, UPDATE`); RLS is
+enabled on all 7 tables; every `@/lib/supabase/admin` import site is
+`server-only`/`"use server"`-guarded and never reachable from a
+`"use client"` file; a spot-check of `createQuiz`/`updateQuiz`/
+`deleteQuiz`/`publishQuiz`/`startSession`/`submitAnswer` found no
+instance of a client-supplied id being trusted without server-side
+re-derivation; `.next/static` has zero matches for
+`SUPABASE_SECRET_KEY`, `GEMINI_API_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, or
+even the bare string `service_role`.
+
+**5. Full lifecycle E2E, run for real against the live Supabase project**
+(32 assertions, using the same direct-production-code technique as
+Phases 7–9): a real teacher account created a quiz, added 3 questions
+(2 MC + 1 TF — seeded via the real `add_quiz_question` RPC rather than a
+live Gemini call, the same substitution this project has used since
+Phase 5/7/8/9 for AI-pipeline-flakiness reasons unrelated to what this
+phase audits), approved them, and published — then confirmed the
+already-proven Phase 6 immutability guard still holds by attempting to
+add a question to the now-published quiz as its own owning teacher and
+getting rejected. Three real students then ran the three cases the task
+asked for explicitly: one scored a real 100%, one scored a real mixed
+33% (1 correct/1 incorrect/1 unanswered), and one had its session forced
+past its deadline mid-quiz — a late answer attempt was rejected, and the
+session was finalized to `expired` (not `completed`) scored from exactly
+what had been saved (1 correct, 2 unanswered). The teacher's results
+query and `loadQuizAnalytics` were then both read directly and cross-
+checked against each other and against hand-computed expected values —
+participants (3), completed/expired (2/1), completion rate (67%),
+average score (55%, matching (100+33+33)/3 rounded), and two individual
+questions' correct/incorrect/unanswered/success-rate breakdowns all
+matched exactly. A second real teacher account confirmed `null`
+analytics and zero RLS-visible session rows for the first teacher's quiz;
+a forged session token resolved to `not_found`.
+
+**6. Cleanup — verified directly, not from the test script's own log**,
+per this phase's explicit instruction: after the test's own cleanup ran,
+independently queried `auth.users`, `quizzes`, and
+`participants`/`quiz_sessions`/`responses` counts directly. Result: only
+the one real pre-existing account and its own "English" quiz remain,
+with that quiz's genuine `participants`/`quiz_sessions`/`responses` rows
+(2/2/20 — the account owner's own real Phase 7 manual testing, confirmed
+unchanged from before this phase) correctly left untouched; zero
+`storage.objects` remain in the `quiz-pdfs` bucket for the temporary
+teacher account (no PDF was ever uploaded in this test, and none was
+left behind either).
+
+**Validation:** `npx tsc --noEmit`, `npm run lint`, `npm run build`, and
+`npm run lint:sql` (all 8 migrations, unchanged) all clean. `npx supabase
+migration list` confirms local/remote match (still 8 — this phase made
+no schema change). No new or temporary dependency was added.
+
+**No database changes this phase** — no migration, grant, RLS, or index
+change was needed or made; every finding above was either application
+code, copy, or nothing at all.

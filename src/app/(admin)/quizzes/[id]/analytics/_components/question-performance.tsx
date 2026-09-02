@@ -53,7 +53,7 @@ function QuestionCard({ question }: { question: QuestionAnalytics }) {
         <div className="shrink-0">{difficultyBadge(question.successRate)}</div>
       </div>
 
-      <dl className="mt-4 grid grid-cols-4 gap-3 text-center">
+      <dl className="mt-4 grid grid-cols-2 gap-3 text-center sm:grid-cols-4">
         <div>
           <dt className="text-xs text-muted-foreground">Correct</dt>
           <dd className="text-sm font-semibold tabular-nums text-success">{question.correct}</dd>

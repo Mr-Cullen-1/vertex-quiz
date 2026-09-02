@@ -218,7 +218,7 @@ export function QuizPlayer({ session }: { session: ActiveSession }) {
               </p>
             ) : null}
 
-            <nav className="flex flex-wrap gap-1.5" aria-label="Jump to question">
+            <nav className="flex flex-wrap gap-2" aria-label="Jump to question">
               {questions.map((q, index) => (
                 <button
                   key={q.id}
@@ -227,7 +227,7 @@ export function QuizPlayer({ session }: { session: ActiveSession }) {
                   onClick={() => setCurrentIndex(index)}
                   aria-current={index === currentIndex}
                   className={cn(
-                    "flex size-7 items-center justify-center rounded-full text-xs font-medium transition-colors disabled:pointer-events-none",
+                    "flex size-9 items-center justify-center rounded-full text-xs font-medium transition-colors disabled:pointer-events-none",
                     index === currentIndex
                       ? "bg-primary text-primary-foreground"
                       : selections[q.id] != null

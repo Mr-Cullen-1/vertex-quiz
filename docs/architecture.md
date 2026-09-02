@@ -793,6 +793,21 @@ the more specific field, which is an acceptable degrade for a
 non-critical piece of chrome. Pages that actually display profile detail
 (`/settings`) do use `assertNoError` and surface a real error there.
 
+**Every route segment has a branded error boundary (Phase 10).**
+`(admin)/error.tsx` (Phase 2) is no longer the only one:
+`src/app/(student)/error.tsx` covers the join/quiz-taking flow (the
+actual exam-taking surface — previously the one place in the app with no
+branded fallback at all), `src/app/error.tsx` covers `/` and `/login`
+(the only routes outside both route groups), and
+`src/app/global-error.tsx` is the last-resort boundary for an error in
+the root layout itself — necessarily minimal and dependency-free, since
+it replaces the root layout including whatever design-system import
+could itself have been the failure. `src/app/not-found.tsx` (also
+Phase 10) is the one shared 404 every `notFound()` call across
+`/quizzes/[id]*` now renders — deliberately identity-agnostic (no
+"back to dashboard"-style link) since it can be reached by a teacher, a
+logged-out visitor, or a student.
+
 ## Environment configuration
 
 `src/lib/env.ts` validates every required environment variable with Zod
@@ -860,6 +875,9 @@ src/
   app/                    Routes (App Router)
     layout.tsx            Root layout + metadata
     page.tsx              Public landing/status page
+    error.tsx              Phase 10 — error boundary for / and /login
+    not-found.tsx          Phase 10 — the one shared 404 for the whole app
+    global-error.tsx        Phase 10 — last-resort boundary for a root layout error
     globals.css           Design tokens (Tailwind v4 @theme)
     icon.png, apple-icon.png  Favicon / Apple touch icon (real logo, Phase 0)
     login/                Phase 2 — public login page + client form
@@ -884,6 +902,7 @@ src/
       settings/             Read-only account info (real profile data)
       _components/          Sidebar, Header, StatCard, mobile nav (Sheet-based)
     (student)/               Public, no auth, no admin chrome
+      error.tsx                Phase 10 — branded error boundary for the join/quiz-taking flow
       join/[token]/            Phase 6 — validate token, show quiz info, collect name, start a session
         _components/             join-form.tsx
       quiz/[sessionToken]/     Phase 7 player + Phase 8 result screen

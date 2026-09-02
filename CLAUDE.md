@@ -240,7 +240,14 @@ function, entirely server-side; the browser never receives a raw
 "service_role privileges" and
 [docs/architecture.md](./docs/architecture.md) → "Analytics".
 
-Full verification logs (Phase 1–9):
+**Phase 10 — audit only, no schema/grant/index change.** Re-verified
+every grant, RLS policy, and admin-client import site live and found zero
+drift from the state documented above. No migration was needed or made;
+every genuine finding this phase was application code or copy — see
+[docs/development-progress.md](./docs/development-progress.md) for the
+full list, including what was investigated and deliberately left alone.
+
+Full verification logs (Phase 1–10):
 [docs/development-progress.md](./docs/development-progress.md).
 
 ## 7. Development rules
@@ -340,24 +347,27 @@ confirmation to continue.
 | 7 | Student quiz player | ✅ Done — randomized per-session order, answer persistence, server-enforced timer, submit; verified end-to-end |
 | 8 | Scoring and results | ✅ Done — server-side scoring on submit/expiry, student result screen, teacher per-quiz results table; verified end-to-end |
 | 9 | Teacher quiz analytics | ✅ Done — participation/completion/expiry counts, score distribution, question-by-question success rate; verified end-to-end |
-| 10 | Final MVP polish | Not started |
+| 10 | Final MVP audit and polish | ✅ Done — full route/security/dependency/responsive audit; branded error/404 boundaries added; stale copy and a real mobile tap-target bug fixed; zero schema/grant changes |
 
-**Current phase:** 9 (Teacher quiz analytics) — **complete**.
-`/quizzes/[id]/analytics` turns a quiz's existing session/response data
-into aggregate insight: participants, completed, expired, completion
-rate, average/highest/lowest score, a five-bucket score distribution, and
-a question-by-question success rate (`correct ÷ total submitted
-sessions` — explicitly not `÷ answered`, so difficulty stays comparable
-across questions). A session past its deadline that nobody ever
-revisited (so it was never scored) is finalized on the spot — via the
-same unmodified `finalizeSession()` from Phase 8, just a new call site —
-so aggregates stay accurate without a background job. Needed **zero**
-new migrations, grants, or indexes — Phase 7/8's grants and Phase 1's
-existing indexes already covered every query; verified live before
-writing any code. `/quizzes/[id]/results` (Phase 8) is unchanged except
-for a small shared nav tying the two pages together. No cross-quiz
-history, charts library, or leaderboard — those are Phase 10+.
-**Next phase:** 10 — Final MVP polish.
+**Current phase:** 10 (Final MVP audit and polish) — **complete**. Not a
+feature phase — audited every route's auth/error/empty state, re-verified
+security (grants, RLS, admin-client discipline, secret exposure) with no
+drift found, and fixed genuine gaps: the app had no branded 404 and no
+error boundary at all for the student join/quiz-taking flow (both
+added — `src/app/not-found.tsx`, `src/app/(student)/error.tsx`, plus
+`src/app/error.tsx`/`global-error.tsx` for completeness); the question
+review page told teachers "Publishing itself arrives in a later phase"
+(false since Phase 6, now fixed); the public landing page still said
+"Phase 0"/"under active development"; the student quiz player's
+"jump to question" buttons were a genuine 28px mobile tap-target defect,
+now 36px. A full teacher→student→results→analytics lifecycle (including
+a real expired session) was re-run end to end against the live database
+with 32 passing assertions. No schema, grant, index, or scoring-formula
+change was needed or made. Full findings, including items investigated
+and deliberately left alone, are in
+[docs/development-progress.md](./docs/development-progress.md).
+**Next:** none scheduled — the MVP is feature-complete pending the
+project owner's own final manual testing and approval.
 
 Note on the table above: an earlier version numbered "Student entry and
 session" as its own Phase 7 (folded into Phase 6 once the actual approved
