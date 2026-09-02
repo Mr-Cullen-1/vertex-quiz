@@ -105,6 +105,17 @@ with `NEXT_PUBLIC_` or referenced from client code — see
    created by the migrations in your Supabase version — see
    [docs/database.md](./docs/database.md) for the exact bucket/RLS setup
    this project expects.
+4. Under Supabase → **Authentication → URL Configuration**, set:
+   - **Site URL** to your deployed app's URL (e.g.
+     `https://vertex-quiz.vercel.app`).
+   - **Redirect URLs** to include both `https://vertex-quiz.vercel.app/**`
+     and, for local development, `http://localhost:3000/**`.
+
+   This is required for teacher password recovery (`/forgot-password`) to
+   redirect back to the right app instead of `localhost` in production —
+   the app itself builds the redirect from `NEXT_PUBLIC_APP_URL` (see
+   [.env.example](./.env.example)), but Supabase will still reject it if
+   the URL isn't also allow-listed here.
 
 ## Gemini API setup
 
