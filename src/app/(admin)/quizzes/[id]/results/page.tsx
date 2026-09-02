@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/server";
 import { assertNoError } from "@/lib/supabase/assert-no-error";
+import { ResultsAnalyticsNav } from "../_components/results-analytics-nav";
 
 type QuizHeader = { id: string; title: string; status: string };
 
@@ -126,6 +127,8 @@ export default async function QuizResultsPage(
         <h2 className="text-xl font-semibold text-foreground">Results</h2>
         <p className="text-sm text-muted-foreground">{quiz.title}</p>
       </div>
+
+      <ResultsAnalyticsNav quizId={quiz.id} active="results" />
 
       <div className="rounded-xl bg-card p-6 ring-1 ring-foreground/10">
         {hasSessions ? (

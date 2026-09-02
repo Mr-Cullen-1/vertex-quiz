@@ -227,7 +227,20 @@ expiry detection can't produce two different results. Details:
 [docs/database.md](./docs/database.md) → "service_role privileges" and
 [docs/architecture.md](./docs/architecture.md) → "Scoring and results".
 
-Full verification logs (Phase 1–8):
+**Phase 9 — no schema, privilege, or index change at all.**
+`authenticated`'s existing `SELECT` on `quiz_sessions`/`responses` and
+full CRUD on `questions`/`answers`, scoped by Phase 1's RLS, and
+`service_role`'s Phase 7/8 grants (needed only to self-heal a stale
+session via the unmodified `finalizeSession()`), were already exactly
+what `src/lib/quizzes/analytics.ts`'s `loadQuizAnalytics()` needs —
+checked live before writing any code. All aggregation (score
+distribution, question success rates, completion rate) happens in one
+function, entirely server-side; the browser never receives a raw
+`responses` row. Details: [docs/database.md](./docs/database.md) →
+"service_role privileges" and
+[docs/architecture.md](./docs/architecture.md) → "Analytics".
+
+Full verification logs (Phase 1–9):
 [docs/development-progress.md](./docs/development-progress.md).
 
 ## 7. Development rules
@@ -326,25 +339,25 @@ confirmation to continue.
 | 6 | Quiz publishing and student access | ✅ Done — publishing, access token, `/join/{token}`, participant + session creation; student entry/session folded in here too (an earlier version of this table listed that as a separate Phase 7 — see below) |
 | 7 | Student quiz player | ✅ Done — randomized per-session order, answer persistence, server-enforced timer, submit; verified end-to-end |
 | 8 | Scoring and results | ✅ Done — server-side scoring on submit/expiry, student result screen, teacher per-quiz results table; verified end-to-end |
-| 9 | Analytics | Not started |
+| 9 | Teacher quiz analytics | ✅ Done — participation/completion/expiry counts, score distribution, question-by-question success rate; verified end-to-end |
 | 10 | Final MVP polish | Not started |
 
-**Current phase:** 8 (Scoring and results) — **complete**. Every session
-that ends — explicit submit or expiry — is scored server-side from its
-saved `responses` (never from anything the client sends) and the result
-is persisted onto `quiz_sessions.score`/`.correct_answers` — columns
-Phase 1 provisioned and left unused until now. A student sees their own
-result (score %, correct/incorrect/unanswered/total, their name, the quiz
-title) on the same `/quiz/{session_token}` route the moment their session
-ends. A teacher sees every student's result for a quiz they own at
-`/quizzes/[id]/results`, linked from a new `/results` directory and from
-the quiz detail page. Needed **zero** new migrations or grants — Phase 7
-had already granted everything scoring requires, and Phase 2's teacher
-grants plus Phase 1's RLS already covered the results page; this was
-verified live before writing any code, not assumed. No analytics,
-charts, or per-question breakdowns — those are Phase 9.
-**Next phase:** 9 — Analytics (quiz-level aggregates: participants,
-completion rate, average/high/low score).
+**Current phase:** 9 (Teacher quiz analytics) — **complete**.
+`/quizzes/[id]/analytics` turns a quiz's existing session/response data
+into aggregate insight: participants, completed, expired, completion
+rate, average/highest/lowest score, a five-bucket score distribution, and
+a question-by-question success rate (`correct ÷ total submitted
+sessions` — explicitly not `÷ answered`, so difficulty stays comparable
+across questions). A session past its deadline that nobody ever
+revisited (so it was never scored) is finalized on the spot — via the
+same unmodified `finalizeSession()` from Phase 8, just a new call site —
+so aggregates stay accurate without a background job. Needed **zero**
+new migrations, grants, or indexes — Phase 7/8's grants and Phase 1's
+existing indexes already covered every query; verified live before
+writing any code. `/quizzes/[id]/results` (Phase 8) is unchanged except
+for a small shared nav tying the two pages together. No cross-quiz
+history, charts library, or leaderboard — those are Phase 10+.
+**Next phase:** 10 — Final MVP polish.
 
 Note on the table above: an earlier version numbered "Student entry and
 session" as its own Phase 7 (folded into Phase 6 once the actual approved

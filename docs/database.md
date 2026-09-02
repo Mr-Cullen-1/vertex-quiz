@@ -204,6 +204,17 @@ checked `authenticated`'s grants on `quiz_sessions`/`participants`/
 results page needs, with ownership already enforced. No migration, no
 grant change, no RLS change for this entire phase.
 
+**Phase 9 (teacher analytics) — checked live, needed nothing new either.**
+Re-ran the same checks: `authenticated`'s `SELECT` on `quiz_sessions`/
+`responses` and full CRUD on `questions`/`answers` (all pre-existing),
+scoped by their Phase 1 RLS policies, already cover every read the
+analytics page does. `service_role`'s Phase 7/8 grants already cover
+`finalizeSession` (self-healing any of a quiz's own sessions that are
+past their deadline but were never scored — see architecture.md →
+"Analytics"). Existing indexes (`quiz_sessions(quiz_id)`,
+`responses(session_id)`) already match this page's query shape. No
+migration, no grant change, no RLS change, no new index for this phase.
+
 ## Principles
 
 - UUID primary keys (`gen_random_uuid()`, built into Postgres 13+ — no
@@ -1055,3 +1066,64 @@ require, using real Supabase data.
   `responses` rows (from the account owner's own manual Phase 7 testing)
   were confirmed present and deliberately left untouched — they are the
   project owner's real data, not test residue.
+
+## Live verification — Phase 9 teacher analytics (2026-09-02)
+
+No migration, grant, or index change this phase (see "service_role
+privileges" above) — every check below confirms the *existing* schema
+and privileges already produce correct aggregates, using real data.
+
+- **The task's own worked example, built for real**: a real 10-question
+  quiz with 10 real student sessions, engineered (via a programmatically
+  generated answer matrix, verified by its own sanity-check assertions
+  before use — an earlier hand-typed version was caught wrong by exactly
+  that check) to score 100/90/80/70/60/50/40/30/20/10%. `loadQuizAnalytics`
+  returned `averageScore = 55`, distribution buckets `2/1/1/1/5`
+  (90–100/80–89/70–79/60–69/0–59), and two questions engineered to
+  8-correct/1-incorrect/1-unanswered and 2-correct/6-incorrect/2-unanswered
+  scored exactly `80%` and `20%` success — not `25%` (`2/8`), confirming
+  the denominator used is the total submitted session count as specified,
+  not the answered count.
+- **Self-healing, proven against a genuinely abandoned session**: an
+  11th session answered half its questions, then had `expires_at` forced
+  into the past directly in the database and was never revisited by any
+  student-facing code. Calling `loadQuizAnalytics` (the teacher opening
+  analytics — nothing else) flipped its `status` to `expired` and gave it
+  a real persisted `score`, confirmed by a raw database read afterward,
+  not by re-reading the app's own claim. The quiz's average completion
+  time was independently confirmed to stay a small, real number — proof
+  that the average-time calculation actually excludes `expired` sessions,
+  since including this one (finalized at the moment of the test's own
+  query) would have wildly inflated it.
+- **Divide-by-zero and misleading-zero cases, all real database
+  states**: a freshly published quiz with zero sessions returned `null`
+  (not `0` or `NaN`) for `completionRate`/`averageScore`; a quiz with two
+  started-but-never-submitted sessions returned `completed = 0`,
+  `averageScore = null` (not `0%`), and every question's `successRate =
+  null` (not `0%`) — confirmed by inspecting the actual returned object,
+  not just the rendered page.
+- **Security, directly against the real database and the real running
+  app**: a forged/nonexistent quiz id, a second real teacher's own
+  authenticated client, and a genuinely anonymous client all got `null`
+  from `loadQuizAnalytics` — the anonymous case specifically via a real
+  `permission denied for table quizzes` from Postgres (confirming `anon`
+  still has zero table grants, not merely an RLS-empty result). Through
+  the real running app: a second teacher's browser got a real `404`
+  opening the first teacher's `/quizzes/[id]/analytics` URL directly, and
+  a browser with no Supabase session at all was redirected away from the
+  route rather than shown any data.
+- **No leakage in a fresh production build**: `.next/static` re-checked
+  for `SUPABASE_SECRET_KEY` and `GEMINI_API_KEY` — zero matches. The
+  actual object `loadQuizAnalytics` returns was inspected directly (not
+  just the rendered HTML) to confirm it carries no `is_correct`, no raw
+  session tokens, and no other teacher's identifiers.
+- **Cleanup**: every temporary teacher/quiz/session/response created by
+  both test layers was deleted and independently re-verified gone via a
+  direct `auth.users`/`quizzes` query. One quiz's first delete attempt
+  hit the same transient Admin API failure seen in earlier phases —
+  caught by this independent check rather than trusted away, then fixed
+  by retrying through the owning teacher's own client (which succeeded
+  immediately); confirmed nothing was left behind afterward. Final state:
+  only the one real pre-existing account and its own "English" quiz
+  remain, with that quiz's genuine (non-test) session/response data from
+  the account owner's own manual testing left untouched.

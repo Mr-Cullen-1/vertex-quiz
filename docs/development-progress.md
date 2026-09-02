@@ -1631,3 +1631,180 @@ new migration this phase).
 **Still not implemented — Phase 9 and later:** analytics dashboards,
 charts, per-question statistics, leaderboards, and anything beyond one
 student's own result and one teacher's per-quiz results table.
+
+---
+
+## Phase 9 — Teacher quiz analytics ✅
+
+**Date:** 2026-09-02
+
+**Goal:** turn the existing per-quiz results data into aggregate insight
+for one quiz — participation/completion/expiry counts, score
+distribution, and question-by-question difficulty — without building
+cross-quiz history, charts requiring a new dependency, or anything
+beyond what a single quiz's own data supports.
+
+**1. Inspected before writing anything — found the schema, grants, and
+indexes already sufficient; the only real gap was in the data itself,
+not the database.** Live grant checks (`information_schema.
+role_table_grants`, same discipline as every phase): `authenticated`
+already had `SELECT` on `quiz_sessions`/`responses` (Phase 2) and full
+CRUD on `questions`/`answers` (Phase 2), all scoped by Phase 1's RLS —
+exactly what reading aggregate data for a teacher's own quiz needs.
+`service_role` already had everything `finalizeSession` (Phase 8) needs.
+Existing indexes (`quiz_sessions(quiz_id)`, `responses(session_id)`)
+already match every query pattern this phase adds — a quiz's sessions
+and a batch of sessions' responses. **Zero new migrations, grants, or
+indexes.**
+
+The real gap found during inspection: a session whose `expires_at` has
+passed but that nobody has revisited since (no student page load, no
+answer attempt) sits at `status = 'started'`/`'in_progress'` forever —
+nothing before Phase 9 ever needed to notice this, but an accurate
+"Expired" count and score-based averages do. Fixed by having the
+analytics loader call the **existing, unmodified** `finalizeSession()`
+from Phase 8 on any of a quiz's own sessions found in that state before
+aggregating — the same function a student's own page load would trigger,
+just from a new, already-ownership-verified call site. This does not
+change scoring semantics; it changes when the existing logic runs.
+
+**2. What was built:**
+
+- `src/lib/quizzes/analytics.ts` (new) — `loadQuizAnalytics(supabase,
+  quizId)`, the single function every number on the page comes from.
+  Ownership is the same plain RLS-scoped quiz read every `/quizzes/[id]/*`
+  page uses; a nonexistent or another-teacher's quiz id returns `null` —
+  the caller treats that as `notFound()`. Self-heals stale sessions (see
+  above), then computes:
+  - **Overview**: `participants` (every `quiz_sessions` row — there is no
+    draft/pending session state in this schema, so every row is already
+    an "eligible started session"), `completed`, `expired`,
+    `completionRate = completed / participants` (explicit denominator,
+    documented in the code, `null` when there are zero participants —
+    never a division by zero), `scoredSessionCount` (`completed +
+    expired`), `averageScore`/`highestScore`/`lowestScore` (over sessions
+    with a persisted `score` — `completed` **and** `expired`, matching
+    the task's own definition — never treating a missing result as 0),
+    and `averageCompletionSeconds` (`completed_at - started_at`, `status
+    = 'completed'` **only** — an expired session's `completed_at` records
+    when the system *discovered* the expiry, not when the student
+    actually stopped working, so including it would silently inflate the
+    average; documented in the code as the reason, not just the rule).
+  - **Score distribution**: the five fixed buckets from the task
+    (90–100, 80–89, 70–79, 60–69, 0–59), counting only sessions with a
+    valid persisted score — an in-progress session is never counted as
+    0%.
+  - **Question analytics**: for every question, in canonical
+    `order_index` order (not any student's shuffled order) —
+    `correct`/`incorrect` from `responses.is_correct` among **submitted**
+    sessions only (`completed` ∪ `expired` — a still-in-progress
+    session's answer could still change, so it's excluded), `unanswered
+    = totalSubmittedSessions - correct - incorrect`, and `successRate =
+    correct / totalSubmittedSessions` — explicitly the total submitted
+    session count, **not** `correct / (correct + incorrect)`, so
+    difficulty is comparable across questions regardless of how many
+    students skipped each one; `null` (not `0`) when no sessions have
+    submitted yet, so nothing divides by zero. Also includes a per-option
+    selection breakdown (A/B/C/D or True/False, with the correct option
+    marked) — inspected first per the task's own caution, and included
+    because it fell out of data already being loaded for the
+    correct/incorrect counts, not from any new query.
+- `src/app/(admin)/quizzes/[id]/_components/results-analytics-nav.tsx`
+  (new) — a small two-tab `[Analytics] [Results]` nav, shared by both
+  pages, so they read as siblings rather than two competing systems.
+- `src/app/(admin)/quizzes/[id]/analytics/page.tsx` (new) — the page
+  itself: metric cards (participants, completed, completion rate, average
+  score as the primary row; highest, lowest, average time, expired as
+  the secondary row, matching the task's suggested hierarchy), a
+  dependency-free horizontal-bar score distribution (plain divs — five
+  fixed buckets don't justify a charting library, and every bar's count
+  is rendered as real text next to it, never conveyed by height/color
+  alone), and a question-by-question card list with a restrained
+  (no-red) difficulty badge — Very easy / Good / Needs attention /
+  Difficult — plus the optional answer-option counts.
+- `src/app/(admin)/quizzes/[id]/results/page.tsx` (modified) — added the
+  same `ResultsAnalyticsNav`, so Results ↔ Analytics navigation is
+  reciprocal.
+- `src/app/(admin)/quizzes/[id]/page.tsx` (modified) — an "Analytics"
+  button now sits next to "View results" once a quiz is no longer a
+  draft.
+
+**Empty states, exactly per the task's distinctions:**
+- Zero participants → one centered "No student results yet" card; none
+  of the metric/distribution/question sections render at all.
+- Participants exist but none have submitted (`scoredSessionCount === 0`)
+  → Average/Highest/Lowest show "—" with a "No completed sessions yet"
+  caption instead of a misleading `0%`; the distribution section shows an
+  explanatory sentence instead of an empty chart; every question's
+  success rate shows "—", not `0%`. Completion rate still correctly shows
+  `0%` in this state (it's a real, meaningful value — "0 of N completed"
+  — unlike an average with nothing to average).
+
+**3. Real end-to-end verification performed (not just code review), using
+the same two-layer approach as Phase 7/8, against the real Supabase
+project:**
+
+- **Direct production-code integration tests** (49 assertions): the real
+  `loadQuizAnalytics` (plus `startSession`/`loadPlayableSession`/
+  `submitAnswer`/`submitQuiz` to generate real data) run directly against
+  the live database via `node --conditions=react-server` + the `@/*`-alias
+  loader. Built the exact worked example from the task — a real
+  10-question quiz, 10 real student sessions engineered (via a
+  programmatically-constructed answer matrix, not hand-typed, after an
+  early hand-typed version was caught wrong by its own sanity-check
+  assertion) to score exactly 100/90/80/70/60/50/40/30/20/10% — and
+  confirmed: `averageScore = 55`, the distribution buckets are exactly
+  `2/1/1/1/5`, and two specific questions engineered to 8-correct/
+  1-incorrect/1-unanswered and 2-correct/6-incorrect/2-unanswered scored
+  exactly `80%` and `20%` success — not `2/8 = 25%`, confirming the
+  denominator is the total submitted session count as specified, not the
+  answered count. Also verified: the per-option breakdown counted the
+  correct MC option's 8 selections correctly; an 11th, genuinely
+  abandoned session (answered half the questions, deadline forced into
+  the past, never revisited) was self-healed into `expired` by
+  `loadQuizAnalytics` itself and its score correctly joined the
+  aggregates; the average completion time stayed a small real number
+  rather than being skewed by that session's finalization timestamp; a
+  quiz with zero participants and a quiz with participants but zero
+  completions both produced `null` (never `0` or `NaN`) for every
+  score-based metric; a forged/nonexistent quiz id, a second real
+  teacher's own client, and an anonymous (unauthenticated) client all got
+  `null` back — the last one via a real `permission denied` from
+  Postgres, confirming `anon` still has no table grant, not just an RLS
+  empty-result.
+- **Real-browser tests** (12 assertions, Chromium via a temporarily
+  installed `playwright`, never added to `package.json`): two real
+  students completed a 2-question quiz (100% and 50%), and the owning
+  teacher's real login saw the correct quiz title, participant count,
+  average/highest/lowest scores, and a Question Performance section with
+  no `is_correct` string anywhere on the page; clicking between the new
+  Analytics/Results tabs navigated correctly in both directions; a second
+  real teacher account got a real `404` (not an empty/blank page)
+  opening the first teacher's analytics URL directly; a browser with no
+  Supabase session at all (simulating both "anonymous" and "a student,
+  who never has one either") was redirected away from the route rather
+  than shown any data.
+- **No secret or correctness leakage**: `.next/static` re-checked for
+  `SUPABASE_SECRET_KEY`/`GEMINI_API_KEY` — zero matches. The analytics
+  page's own client-visible data was inspected directly: no
+  `is_correct`, no raw session tokens, no other teacher's ids anywhere in
+  what `loadQuizAnalytics` returns.
+- **Cleanup**: every temporary teacher/quiz/session created by both test
+  layers was deleted and independently re-verified gone via a direct
+  `auth.users`/`quizzes` query — not by trusting either script's own exit
+  code, after Phase 7/8 both surfaced at least one silently-failed
+  cleanup this way. (This run's own first attempt did hit the same
+  transient Admin API "Unexpected failure" on one quiz delete — caught by
+  this same independent check, then fixed by retrying the delete through
+  the owning teacher's own client, which succeeded immediately; the test
+  script's cleanup step now retries automatically.) Final state: only the
+  one real pre-existing account and its own "English" quiz remain.
+
+**Validation:** `npx tsc --noEmit`, `npm run lint`, `npm run build`, and
+`npm run lint:sql` (all 8 migrations — unchanged this phase) all clean.
+`npx supabase migration list` confirms local/remote match (still 8).
+
+**Still not implemented — Phase 10 and later:** cross-quiz/historical
+analytics, charts beyond the plain bar visualization, leaderboards,
+CSV/export, live mode, and anything else outside one quiz's own
+aggregate view.

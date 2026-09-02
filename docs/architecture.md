@@ -154,8 +154,16 @@ and the result is persisted onto the same `quiz_sessions.score`/
 result on the same `/quiz/[sessionToken]` route; teachers see every
 result for a quiz they own at `/quizzes/[id]/results`. Needed **no**
 migration or grant change at all — see "Scoring and results" below and
-[database.md](./database.md) → "service_role privileges". No analytics,
-charts, or per-question breakdowns — those are Phase 9+.
+[database.md](./database.md) → "service_role privileges".
+
+**Phase 9 status: complete.** `/quizzes/[id]/analytics` turns that same
+data into aggregate insight for one quiz — participation/completion/
+expiry counts, average/highest/lowest score, a fixed-bucket score
+distribution, and question-by-question difficulty with a success-rate
+formula defined precisely to stay comparable across questions. Needed
+**no** migration, grant, or index change either — see "Analytics" below
+and [database.md](./database.md) → "service_role privileges". No
+cross-quiz history, charts library, or leaderboard — those are Phase 10+.
 
 Phase 3 implements quiz metadata: a teacher creates a `quizzes` row with a
 title, optional description, a fixed `multiple_choice_count` /
@@ -664,6 +672,104 @@ the quiz by id (`quizzes_select_own`) — another teacher's quiz id comes
 back as no row, indistinguishable from a nonexistent one — gates the
 whole page; no new ownership check, RPC, or policy was needed.
 
+## Analytics (Phase 9)
+
+**Needed no migration, grant, or index at all.** Same discipline as every
+grant decision in this project: checked live before writing any code and
+found `authenticated`'s existing `SELECT` on `quiz_sessions`/`responses`
+(Phase 2) plus its RLS (Phase 1), and `service_role`'s existing grants
+for `finalizeSession` (Phase 7/8), already covered everything this page
+needs. The existing `quiz_sessions(quiz_id)` and `responses(session_id)`
+indexes already match this page's query shape — a quiz's sessions, and a
+batch of sessions' responses.
+
+`/quizzes/[id]/analytics` is the aggregate view; `/quizzes/[id]/results`
+(Phase 8) stays the detailed per-student table — deliberately not merged
+into one page, and deliberately not duplicating each other's data. A
+small shared nav (`ResultsAnalyticsNav`) makes the two read as siblings.
+
+```
+Teacher opens /quizzes/[id]/analytics
+  → src/lib/quizzes/analytics.ts: loadQuizAnalytics(supabase, quizId)
+      RLS-scoped SELECT quizzes WHERE id = quizId  -- ownership gate
+      → no row → null (page calls notFound())
+      SELECT questions, answers, quiz_sessions for this quiz
+      finalizeStaleSessions(): any session still started/in_progress
+        past its own expires_at gets finalizeSession()'d right now
+        (Phase 7/8's own function, unchanged — just a new call site)
+      SELECT responses for every completed+expired ("submitted") session
+      → aggregate entirely in memory (see formulas below)
+  → renders metric cards, a plain-div score-distribution bar chart,
+    and a question-by-question difficulty list
+```
+
+**The one thing Phase 9 discovered that Phase 8 didn't need to care
+about**: a session whose deadline has passed but that nobody has
+revisited since (no page load, no answer attempt) sits at `status =
+'started'`/`'in_progress'` indefinitely — nothing before this needed to
+notice, but an accurate "how many sessions expired" and a correct
+average score both do. `loadQuizAnalytics` fixes exactly this, for
+exactly the quiz being viewed, by calling `finalizeSession()` on any of
+its own stale sessions before aggregating — the identical function a
+student's own page load would have triggered eventually, just invoked
+proactively from an already-ownership-verified read. This is a new call
+site, not a change to how scoring works.
+
+**Definitions, stated precisely because the task asked for them to be:**
+- **Participants** = every `quiz_sessions` row for the quiz. This schema
+  has no draft/pending session state — a row is created already
+  `started` — so every row is, by construction, an "eligible started
+  session."
+- **Completion rate** = `completed ÷ participants`. Nothing is excluded
+  from the denominator, because nothing *could* be excluded — see above.
+- **Average / highest / lowest score** include `completed` **and**
+  `expired` sessions with a persisted score — matching the task's own
+  wording — never sessions still genuinely in progress, and never a
+  missing result treated as `0`.
+- **Average completion time** uses `status = 'completed'` sessions
+  *only*. An `expired` session's `completed_at` records when the system
+  *discovered* the expiry (a page load, an answer attempt, or this
+  page's own self-healing pass) — not when the student stopped working —
+  so `completed_at - started_at` for an expired session isn't a
+  meaningful duration and would silently inflate the average if included.
+- **A question's success rate** = `correct ÷ total submitted sessions for
+  the quiz` (`completed + expired`) — **not** `correct ÷ (correct +
+  incorrect)`. Fixing the denominator at the quiz's total submitted
+  session count, rather than letting it float per question, is what makes
+  two questions' difficulty comparable even when different numbers of
+  students skipped each one. An unanswered response is neither correct
+  nor incorrect — it only ever reduces the gap between `correct +
+  incorrect` and the fixed denominator.
+- The optional **answer-option breakdown** (A/B/C/D or True/False
+  selection counts, correct option marked) is teacher-only and was
+  included because it required no new query — the same `responses` read
+  that produces correct/incorrect counts already carries
+  `selected_answer_id`.
+
+**Server-side aggregation, not a client-side dump.** The browser never
+receives a raw `responses` row — `loadQuizAnalytics` returns only
+already-aggregated numbers (overview metrics, five distribution buckets,
+one object per question). This was a deliberate choice for the same
+reason as everywhere else needing analytics-shaped data: it works
+correctly at 10 participants and doesn't change shape at 1,000, since the
+page's own transfer size is fixed by question/bucket count, not
+participant count. An RPC or SQL view was considered and rejected for
+this phase's actual scale — the in-memory aggregation only ever touches
+one quiz's own rows (bounded by however many students take that one
+quiz), and Phase 4/5's RPCs exist for atomic *multi-table writes*, not
+reads; if a future quiz's participant count made this page's queries
+noticeably slow, a SQL-side aggregate (view or RPC) would be the natural
+next step — deliberately not built now, per the task's own instruction
+not to introduce one "just because it's possible."
+
+**No new information is exposed to the client beyond aggregates.** The
+page never returns a raw `responses` row, a raw `is_correct` value, or
+another teacher's data — every number is already an aggregate by the
+time `loadQuizAnalytics` returns it. Ownership is the same RLS-scoped
+`quizzes_select_own` read every other `/quizzes/[id]/*` page uses —
+another teacher's quiz id, a forged id, and an unauthenticated request
+all resolve to `null`/`notFound()`, indistinguishable from each other.
+
 ## Data-loading errors
 
 A Supabase query error must never be allowed to quietly look like "no
@@ -768,8 +874,11 @@ src/
           review/                 Phase 5 — question review/edit/add/delete/reorder
             _components/            question-list/-card.tsx, question-editor-dialog.tsx, add-question-button.tsx
           results/                Phase 8 — per-quiz teacher results table
+          analytics/              Phase 9 — per-quiz aggregate analytics
+            _components/            score-distribution-chart.tsx, question-performance.tsx
           _components/          delete-quiz-button.tsx, pdf-generation-panel.tsx (Phase 4),
-                                 publish-quiz-button.tsx, student-access-link.tsx (Phase 6)
+                                 publish-quiz-button.tsx, student-access-link.tsx (Phase 6),
+                                 results-analytics-nav.tsx (Phase 9, shared by results/ and analytics/)
         _components/          quiz-form.tsx — shared create/edit form
       results/              Phase 8 — directory of quizzes with results, linking into each's own results table
       settings/             Read-only account info (real profile data)
@@ -797,6 +906,7 @@ src/
       question-actions.ts           Phase 5 — add/update/delete/reorder/setReviewStatus
       access-token.ts                Phase 6 — generateAccessToken() (crypto.randomBytes), reused for session_token too
       publish-actions.ts              Phase 6 — publishQuiz
+      analytics.ts                     Phase 9 — loadQuizAnalytics (all aggregation lives here)
     student/
       schema.ts                Phase 6 — Zod shape for first/last name input
       access.ts                 Phase 6 — loadPublishedQuizByToken (service-role client)
@@ -819,7 +929,7 @@ src/
       assert-no-error.ts       Phase 2 — throw-on-Supabase-error helper
   proxy.ts                 Phase 1/2 — session refresh + optimistic redirects
 supabase/
-  migrations/              Phase 1–7 — SQL schema + RLS + grants + Storage + RPC, via Supabase CLI (Phase 8 added no migration)
+  migrations/              Phase 1–7 — SQL schema + RLS + grants + Storage + RPC, via Supabase CLI (Phase 8/9 added no migration)
 docs/                     Reference documentation (this directory)
 ```
 

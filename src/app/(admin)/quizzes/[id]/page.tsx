@@ -144,9 +144,18 @@ export default async function QuizDetailPage(
               variant="outline"
               size="sm"
               nativeButton={false}
-              render={<Link href={`/quizzes/${quiz.id}/results`} />}
+              render={<Link href={`/quizzes/${quiz.id}/analytics`} />}
             >
               <BarChart3 className="size-4" />
+              Analytics
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              nativeButton={false}
+              render={<Link href={`/quizzes/${quiz.id}/results`} />}
+            >
+              <ClipboardList className="size-4" />
               View results
             </Button>
           </div>
