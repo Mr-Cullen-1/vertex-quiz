@@ -27,6 +27,7 @@ import {
 } from "@/components/ui/dialog";
 import { addQuestion, updateQuestion } from "@/lib/quizzes/question-actions";
 import type { QuestionInputValues } from "@/lib/quizzes/question-schema";
+import type { QuizFormat } from "@/lib/quizzes/format";
 
 type QuestionTypeValue = QuestionInputValues["type"];
 
@@ -46,6 +47,7 @@ function defaultOptionsFor(type: QuestionTypeValue): string[] {
 
 export function QuestionEditorDialog({
   quizId,
+  quizFormat,
   trigger,
   title,
   description,
@@ -53,6 +55,7 @@ export function QuestionEditorDialog({
   initialQuestion,
 }: {
   quizId: string;
+  quizFormat: QuizFormat;
   trigger: React.ReactElement;
   title: string;
   description: string;
@@ -61,6 +64,11 @@ export function QuestionEditorDialog({
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
+  // Vocabulary Quiz is Multiple Choice only — the type picker is only shown
+  // when either the quiz is Comprehension, or this question is a pre-existing
+  // True/False question left over from a format switch (so the teacher has a
+  // way to fix it rather than being stuck with an uneditable field).
+  const canPickType = quizFormat === "comprehension" || initialQuestion?.type === "true_false";
   const [type, setType] = useState<QuestionTypeValue>(initialQuestion?.type ?? "multiple_choice");
   const [questionText, setQuestionText] = useState(initialQuestion?.questionText ?? "");
   const [options, setOptions] = useState<string[]>(
@@ -121,18 +129,24 @@ export function QuestionEditorDialog({
         <div className="flex flex-col gap-4">
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="question-type">Question type</Label>
-            <Select
-              value={type}
-              onValueChange={(value) => handleTypeChange(value as QuestionTypeValue)}
-            >
-              <SelectTrigger id="question-type" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="multiple_choice">Multiple Choice</SelectItem>
-                <SelectItem value="true_false">True / False</SelectItem>
-              </SelectContent>
-            </Select>
+            {canPickType ? (
+              <Select
+                value={type}
+                onValueChange={(value) => handleTypeChange(value as QuestionTypeValue)}
+              >
+                <SelectTrigger id="question-type" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="multiple_choice">Multiple Choice</SelectItem>
+                  <SelectItem value="true_false">True / False</SelectItem>
+                </SelectContent>
+              </Select>
+            ) : (
+              <p id="question-type" className="text-sm text-muted-foreground">
+                Multiple Choice — Vocabulary Quiz supports Multiple Choice only.
+              </p>
+            )}
           </div>
 
           <div className="flex flex-col gap-1.5">

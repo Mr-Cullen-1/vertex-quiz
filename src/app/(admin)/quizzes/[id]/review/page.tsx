@@ -4,6 +4,7 @@ import { notFound, redirect } from "next/navigation";
 import { ArrowLeft, CheckCircle2 } from "lucide-react";
 import { createClient } from "@/lib/supabase/server";
 import { assertNoError } from "@/lib/supabase/assert-no-error";
+import { QUIZ_FORMAT_LABEL, type QuizFormat } from "@/lib/quizzes/format";
 import { QuestionList, type QuestionWithAnswers } from "./_components/question-list";
 import { AddQuestionButton } from "./_components/add-question-button";
 
@@ -11,6 +12,7 @@ type QuizSummary = {
   id: string;
   title: string;
   status: "draft" | "published" | "closed";
+  format: QuizFormat;
 };
 
 export async function generateMetadata(
@@ -37,7 +39,7 @@ export default async function QuestionReviewPage(
 
   const { data: quiz, error } = await supabase
     .from("quizzes")
-    .select("id, title, status")
+    .select("id, title, status, format")
     .eq("id", id)
     .maybeSingle()
     .overrideTypes<QuizSummary, { merge: false }>();
@@ -88,12 +90,12 @@ export default async function QuestionReviewPage(
           <div>
             <h2 className="text-xl font-semibold text-foreground">{quiz.title}</h2>
             <p className="text-sm text-muted-foreground">
-              {items.length} question{items.length === 1 ? "" : "s"} ·{" "}
-              {reviewedCount} / {items.length} reviewed
+              {QUIZ_FORMAT_LABEL[quiz.format]} · {items.length} question
+              {items.length === 1 ? "" : "s"} · {reviewedCount} / {items.length} reviewed
             </p>
           </div>
 
-          <AddQuestionButton quizId={quiz.id} />
+          <AddQuestionButton quizId={quiz.id} quizFormat={quiz.format} />
         </div>
 
         {readyForPublishing ? (
@@ -118,7 +120,7 @@ export default async function QuestionReviewPage(
           </p>
         </div>
       ) : (
-        <QuestionList quizId={quiz.id} questions={items} />
+        <QuestionList quizId={quiz.id} quizFormat={quiz.format} questions={items} />
       )}
     </div>
   );

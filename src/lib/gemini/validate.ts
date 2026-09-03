@@ -1,5 +1,11 @@
 import type { GeminiExtraction } from "./schema";
-import { validateQuestionShape, type QuestionShapeInput } from "@/lib/quizzes/question-rules";
+// Relative imports (not the usual "@/..." alias): keeps this module free of
+// any path-alias resolution dependency so `validateExtraction` — the
+// authoritative gate on what AI output ever reaches the database — can be
+// unit-tested directly under plain `node --test` (see validate.test.ts),
+// the same reasoning `errors.ts` documents for staying free of `server-only`.
+import { validateQuestionForFormat, type QuestionShapeInput } from "../quizzes/question-rules.ts";
+import type { QuizFormat } from "../quizzes/format.ts";
 
 export type ValidatedAnswer = QuestionShapeInput["answers"][number];
 export type ValidatedQuestion = QuestionShapeInput;
@@ -20,7 +26,7 @@ export type ValidationResult =
  */
 export function validateExtraction(
   extraction: GeminiExtraction,
-  expected: { multipleChoiceCount: number; trueFalseCount: number }
+  expected: { multipleChoiceCount: number; trueFalseCount: number; format: QuizFormat }
 ): ValidationResult {
   const { questions } = extraction;
   const expectedTotal = expected.multipleChoiceCount + expected.trueFalseCount;
@@ -51,8 +57,9 @@ export function validateExtraction(
   const validated: ValidatedQuestion[] = [];
 
   for (const [index, q] of questions.entries()) {
-    const result = validateQuestionShape(
+    const result = validateQuestionForFormat(
       { type: q.type, question_text: q.question, answers: q.answers },
+      expected.format,
       `Question ${index + 1}`
     );
     if (!result.success) {

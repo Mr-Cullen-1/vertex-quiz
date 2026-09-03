@@ -30,6 +30,7 @@ import {
   uploadQuizPdf,
 } from "@/lib/quizzes/generate-actions";
 import { MAX_PDF_SIZE_BYTES } from "@/lib/quizzes/pdf";
+import type { QuizFormat } from "@/lib/quizzes/format";
 
 type Stage =
   | { kind: "idle" }
@@ -43,12 +44,14 @@ const MAX_PDF_LABEL = `${Math.floor(MAX_PDF_SIZE_BYTES / (1024 * 1024))} MB`;
 
 export function PdfGenerationPanel({
   quizId,
+  format,
   multipleChoiceCount,
   trueFalseCount,
   hasSourcePdf,
   existingQuestionCount,
 }: {
   quizId: string;
+  format: QuizFormat;
   multipleChoiceCount: number;
   trueFalseCount: number;
   hasSourcePdf: boolean;
@@ -61,6 +64,7 @@ export function PdfGenerationPanel({
   const [isClearing, setIsClearing] = useState(false);
   const [clearDialogOpen, setClearDialogOpen] = useState(false);
 
+  const isVocabulary = format === "vocabulary";
   const totalQuestions = multipleChoiceCount + trueFalseCount;
   const busy = stage.kind === "uploading" || stage.kind === "processing";
 
@@ -146,7 +150,9 @@ export function PdfGenerationPanel({
                 {existingQuestionCount === 1 ? "" : "s"} generated
               </p>
               <p className="text-sm text-muted-foreground">
-                {multipleChoiceCount} Multiple Choice · {trueFalseCount} True/False
+                {isVocabulary
+                  ? `${multipleChoiceCount} Multiple Choice (vocabulary)`
+                  : `${multipleChoiceCount} Multiple Choice · ${trueFalseCount} True/False`}
               </p>
             </div>
           </div>
@@ -193,9 +199,11 @@ export function PdfGenerationPanel({
         </h3>
         <p className="text-sm text-muted-foreground">
           Upload the source PDF and Vertex Quiz will draft {totalQuestions}{" "}
-          question{totalQuestions === 1 ? "" : "s"} ({multipleChoiceCount}{" "}
-          Multiple Choice, {trueFalseCount} True/False) for you to review
-          later.
+          question{totalQuestions === 1 ? "" : "s"} (
+          {isVocabulary
+            ? `${multipleChoiceCount} Multiple Choice vocabulary question${multipleChoiceCount === 1 ? "" : "s"}`
+            : `${multipleChoiceCount} Multiple Choice, ${trueFalseCount} True/False`}
+          ) for you to review later.
         </p>
       </div>
 

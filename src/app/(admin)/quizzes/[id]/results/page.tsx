@@ -1,14 +1,22 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, Users } from "lucide-react";
+import { ArrowLeft, User, Users } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { createClient } from "@/lib/supabase/server";
 import { assertNoError } from "@/lib/supabase/assert-no-error";
+import { QUIZ_FORMAT_LABEL, type QuizDifficulty, type QuizFormat } from "@/lib/quizzes/format";
 import { ResultsAnalyticsNav } from "../_components/results-analytics-nav";
 
-type QuizHeader = { id: string; title: string; status: string };
+type QuizHeader = {
+  id: string;
+  title: string;
+  status: string;
+  format: QuizFormat;
+  difficulty: QuizDifficulty;
+  total_questions: number;
+};
 
 type SessionRow = {
   id: string;
@@ -72,7 +80,7 @@ export default async function QuizResultsPage(
 
   const { data: quiz, error: quizError } = await supabase
     .from("quizzes")
-    .select("id, title, status")
+    .select("id, title, status, format, difficulty, total_questions")
     .eq("id", id)
     .maybeSingle()
     .overrideTypes<QuizHeader, { merge: false }>();
@@ -126,83 +134,86 @@ export default async function QuizResultsPage(
         </Button>
         <h2 className="text-xl font-semibold text-foreground">Results</h2>
         <p className="text-sm text-muted-foreground">{quiz.title}</p>
+        <p className="text-sm text-muted-foreground">
+          {QUIZ_FORMAT_LABEL[quiz.format]} · {quiz.difficulty} · {quiz.total_questions} question
+          {quiz.total_questions === 1 ? "" : "s"}
+        </p>
       </div>
 
       <ResultsAnalyticsNav quizId={quiz.id} active="results" />
 
-      <div className="rounded-xl bg-card p-6 ring-1 ring-foreground/10">
-        {hasSessions ? (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[720px] text-left text-sm">
-              <thead>
-                <tr className="border-b border-border text-xs text-muted-foreground">
-                  <th className="py-2 pr-4 font-medium">Student</th>
-                  <th className="py-2 pr-4 font-medium">Score</th>
-                  <th className="py-2 pr-4 font-medium">Correct</th>
-                  <th className="py-2 pr-4 font-medium">Incorrect</th>
-                  <th className="py-2 pr-4 font-medium">Unanswered</th>
-                  <th className="py-2 pr-4 font-medium">Total</th>
-                  <th className="py-2 pr-4 font-medium">Status</th>
-                  <th className="py-2 font-medium">Completed</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {sessions!.map((session) => {
-                  const answered = answeredBySession.get(session.id) ?? 0;
-                  const unanswered = session.total_questions - answered;
-                  const incorrect =
-                    session.correct_answers != null ? answered - session.correct_answers : null;
+      {hasSessions ? (
+        <ul className="flex flex-col gap-3 sm:gap-4">
+          {sessions!.map((session) => {
+            const answered = answeredBySession.get(session.id) ?? 0;
+            const unanswered = session.total_questions - answered;
+            const incorrect =
+              session.correct_answers != null ? answered - session.correct_answers : null;
+            const studentName = session.participants
+              ? `${session.participants.first_name} ${session.participants.last_name}`
+              : "Unknown student";
 
-                  return (
-                    <tr key={session.id}>
-                      <td className="py-3 pr-4 font-medium text-foreground">
-                        {session.participants
-                          ? `${session.participants.first_name} ${session.participants.last_name}`
-                          : "Unknown student"}
-                      </td>
-                      <td className="py-3 pr-4 tabular-nums text-foreground">
-                        {session.score != null ? `${Math.round(session.score)}%` : "—"}
-                      </td>
-                      <td className="py-3 pr-4 tabular-nums text-success">
-                        {session.correct_answers ?? "—"}
-                      </td>
-                      <td className="py-3 pr-4 tabular-nums text-destructive">
-                        {incorrect ?? "—"}
-                      </td>
-                      <td className="py-3 pr-4 tabular-nums text-muted-foreground">{unanswered}</td>
-                      <td className="py-3 pr-4 tabular-nums text-muted-foreground">
-                        {session.total_questions}
-                      </td>
-                      <td className="py-3 pr-4">
-                        <Badge variant={STATUS_VARIANT[session.status]}>
-                          {STATUS_LABEL[session.status]}
-                        </Badge>
-                      </td>
-                      <td className="py-3 text-muted-foreground">
-                        {session.completed_at ? formatDateTime(session.completed_at) : "—"}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="flex flex-col items-center gap-3 py-14 text-center">
+            return (
+              <li
+                key={session.id}
+                className="rounded-xl border border-border bg-card p-5 shadow-sm sm:p-6"
+              >
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
+                  <div className="flex min-w-0 flex-1 items-start gap-3">
+                    <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-accent/10 text-accent sm:size-11">
+                      <User className="size-5" />
+                    </div>
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <p className="truncate text-base font-semibold text-foreground">
+                        {studentName}
+                      </p>
+                      <p className="text-sm text-muted-foreground">
+                        {session.completed_at ? formatDateTime(session.completed_at) : "Not completed"}
+                      </p>
+                      <div className="flex flex-wrap gap-x-4 gap-y-1 pt-1 text-sm tabular-nums">
+                        {session.score != null ? (
+                          <span className="font-medium text-foreground">
+                            {Math.round(session.score)}% score
+                          </span>
+                        ) : null}
+                        {session.correct_answers != null ? (
+                          <span className="text-success">{session.correct_answers} correct</span>
+                        ) : null}
+                        {incorrect != null ? (
+                          <span className="text-destructive">{incorrect} incorrect</span>
+                        ) : null}
+                        {unanswered > 0 ? (
+                          <span className="text-muted-foreground">{unanswered} unanswered</span>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+
+                  <Badge variant={STATUS_VARIANT[session.status]} className="shrink-0">
+                    {STATUS_LABEL[session.status]}
+                  </Badge>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      ) : (
+        <div className="rounded-xl border border-border bg-card p-6">
+          <div className="flex flex-col items-center gap-3 py-8 text-center">
             <div className="flex size-11 items-center justify-center rounded-full bg-muted">
               <Users className="size-5 text-muted-foreground" />
             </div>
             <div className="space-y-1">
-              <p className="text-sm font-medium text-foreground">No results yet</p>
+              <p className="text-sm font-medium text-foreground">No sessions yet</p>
               <p className="max-w-sm text-sm text-muted-foreground">
                 {quiz.status === "published"
-                  ? "Once students join and complete this quiz, their results will show up here."
+                  ? "Students haven't completed this quiz yet."
                   : "Publish this quiz and share the join link to start collecting results."}
               </p>
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

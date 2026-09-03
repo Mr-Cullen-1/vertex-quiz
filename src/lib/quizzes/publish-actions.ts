@@ -2,14 +2,16 @@
 
 import { createClient } from "@/lib/supabase/server";
 import { loadOwnedDraftQuiz, requireSession } from "./ownership";
-import { validateQuestionShape } from "./question-rules";
+import { validateQuestionForFormat } from "./question-rules";
 import { generateAccessToken } from "./access-token";
+import type { QuizFormat } from "./format";
 
 export type PublishQuizResult = { success: true } | { success: false; error: string };
 
 type OwnedDraftQuizForPublish = {
   id: string;
   status: string;
+  format: QuizFormat;
   multiple_choice_count: number;
   true_false_count: number;
   total_questions: number;
@@ -53,7 +55,7 @@ export async function publishQuiz(quizId: string): Promise<PublishQuizResult> {
   const { quiz, error: quizError } = await loadOwnedDraftQuiz<OwnedDraftQuizForPublish>(
     supabase,
     quizId,
-    "id, status, multiple_choice_count, true_false_count, total_questions"
+    "id, status, format, multiple_choice_count, true_false_count, total_questions"
   );
   if (!quiz) return { success: false, error: quizError! };
 
@@ -99,7 +101,7 @@ export async function publishQuiz(quizId: string): Promise<PublishQuizResult> {
       question_text: question.question_text,
       answers: question.answers.map((a) => ({ text: a.answer_text, is_correct: a.is_correct })),
     };
-    const result = validateQuestionShape(shape, `"${question.question_text}"`);
+    const result = validateQuestionForFormat(shape, quiz.format, `"${question.question_text}"`);
     if (!result.success) {
       return { success: false, error: `Can't publish: ${result.error}` };
     }

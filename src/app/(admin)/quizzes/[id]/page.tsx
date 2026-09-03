@@ -8,6 +8,7 @@ import { createClient } from "@/lib/supabase/server";
 import { assertNoError } from "@/lib/supabase/assert-no-error";
 import { getEnv } from "@/lib/env";
 import { QUIZ_STATUS_LABEL } from "@/lib/quizzes/status";
+import { QUIZ_FORMAT_LABEL, type QuizDifficulty, type QuizFormat } from "@/lib/quizzes/format";
 import { DeleteQuizButton } from "./_components/delete-quiz-button";
 import { PdfGenerationPanel } from "./_components/pdf-generation-panel";
 import { PublishQuizButton } from "./_components/publish-quiz-button";
@@ -18,6 +19,8 @@ type QuizDetail = {
   title: string;
   description: string | null;
   status: "draft" | "published" | "closed";
+  format: QuizFormat;
+  difficulty: QuizDifficulty;
   multiple_choice_count: number;
   true_false_count: number;
   total_questions: number;
@@ -62,7 +65,7 @@ export default async function QuizDetailPage(
   const { data: quiz, error } = await supabase
     .from("quizzes")
     .select(
-      "id, title, description, status, multiple_choice_count, true_false_count, total_questions, duration_minutes, ends_at, created_at, published_at, access_code, source_pdf_path"
+      "id, title, description, status, format, difficulty, multiple_choice_count, true_false_count, total_questions, duration_minutes, ends_at, created_at, published_at, access_code, source_pdf_path"
     )
     .eq("id", id)
     .maybeSingle()
@@ -160,17 +163,29 @@ export default async function QuizDetailPage(
       <div className="max-w-2xl rounded-xl bg-card p-6 ring-1 ring-foreground/10">
         <dl className="grid grid-cols-1 gap-x-8 gap-y-4 sm:grid-cols-2">
           <div>
+            <dt className="text-sm text-muted-foreground">Format</dt>
+            <dd className="text-sm font-medium text-foreground">
+              {QUIZ_FORMAT_LABEL[quiz.format]}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-sm text-muted-foreground">Difficulty</dt>
+            <dd className="text-sm font-medium text-foreground">{quiz.difficulty}</dd>
+          </div>
+          <div>
             <dt className="text-sm text-muted-foreground">Multiple Choice</dt>
             <dd className="text-sm font-medium text-foreground">
               {quiz.multiple_choice_count}
             </dd>
           </div>
-          <div>
-            <dt className="text-sm text-muted-foreground">True/False</dt>
-            <dd className="text-sm font-medium text-foreground">
-              {quiz.true_false_count}
-            </dd>
-          </div>
+          {quiz.format === "comprehension" ? (
+            <div>
+              <dt className="text-sm text-muted-foreground">True/False</dt>
+              <dd className="text-sm font-medium text-foreground">
+                {quiz.true_false_count}
+              </dd>
+            </div>
+          ) : null}
           <div>
             <dt className="text-sm text-muted-foreground">Total questions</dt>
             <dd className="text-sm font-medium text-foreground">
@@ -211,6 +226,7 @@ export default async function QuizDetailPage(
       {isDraft ? (
         <PdfGenerationPanel
           quizId={quiz.id}
+          format={quiz.format}
           multipleChoiceCount={quiz.multiple_choice_count}
           trueFalseCount={quiz.true_false_count}
           hasSourcePdf={Boolean(quiz.source_pdf_path)}

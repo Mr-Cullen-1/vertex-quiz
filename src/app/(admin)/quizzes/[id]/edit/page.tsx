@@ -3,6 +3,7 @@ import { notFound, redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { assertNoError } from "@/lib/supabase/assert-no-error";
 import { updateQuiz } from "@/lib/quizzes/actions";
+import type { QuizDifficulty, QuizFormat } from "@/lib/quizzes/format";
 import { QuizForm } from "../../_components/quiz-form";
 
 export const metadata: Metadata = {
@@ -14,6 +15,8 @@ type EditableQuiz = {
   title: string;
   description: string | null;
   status: "draft" | "published" | "closed";
+  format: QuizFormat;
+  difficulty: QuizDifficulty;
   multiple_choice_count: number;
   true_false_count: number;
   duration_minutes: number | null;
@@ -29,7 +32,7 @@ export default async function EditQuizPage(
   const { data: quiz, error } = await supabase
     .from("quizzes")
     .select(
-      "id, title, description, status, multiple_choice_count, true_false_count, duration_minutes, ends_at"
+      "id, title, description, status, format, difficulty, multiple_choice_count, true_false_count, duration_minutes, ends_at"
     )
     .eq("id", id)
     .maybeSingle()
@@ -61,6 +64,8 @@ export default async function EditQuizPage(
           defaultValues={{
             title: quiz.title,
             description: quiz.description,
+            format: quiz.format,
+            difficulty: quiz.difficulty,
             multipleChoiceCount: quiz.multiple_choice_count,
             trueFalseCount: quiz.true_false_count,
             durationMinutes: quiz.duration_minutes,

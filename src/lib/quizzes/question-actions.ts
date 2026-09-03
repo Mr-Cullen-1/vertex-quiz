@@ -3,21 +3,26 @@
 import { createClient } from "@/lib/supabase/server";
 import { loadOwnedDraftQuiz, requireSession } from "./ownership";
 import { questionInputSchema, type QuestionInputValues } from "./question-schema";
-import { validateQuestionShape } from "./question-rules";
+import { validateQuestionForFormat } from "./question-rules";
+import type { QuizFormat } from "./format";
 
 export type QuestionMutationResult = { success: true } | { success: false; error: string };
 
 type OwnedDraftQuizStatus = { id: string; status: string };
+type OwnedDraftQuizWithFormat = { id: string; status: string; format: QuizFormat };
 
 /**
  * Builds the `{type, question_text, answers}` payload the `add_quiz_question`/
  * `update_quiz_question` RPCs expect, running the submitted answer options
- * through the same domain rules (`validateQuestionShape`) an AI-generated
- * question is held to. Never trusts `correctIndex` blindly: if it's out of
- * range no answer ends up marked correct, which `validateQuestionShape`
- * itself rejects with a clear "0 correct answers" message.
+ * through the same domain rules (`validateQuestionForFormat`) an
+ * AI-generated question is held to — including the quiz's format, so a
+ * teacher can never manually add a True/False question to a Vocabulary
+ * Quiz even though the client-side editor already hides that option. Never
+ * trusts `correctIndex` blindly: if it's out of range no answer ends up
+ * marked correct, which validation itself rejects with a clear "0 correct
+ * answers" message.
  */
-function buildAndValidateQuestion(input: QuestionInputValues) {
+function buildAndValidateQuestion(input: QuestionInputValues, format: QuizFormat) {
   const parsed = questionInputSchema.safeParse(input);
   if (!parsed.success) {
     return { success: false as const, error: parsed.error.issues[0]?.message ?? "Invalid input." };
@@ -29,7 +34,7 @@ function buildAndValidateQuestion(input: QuestionInputValues) {
     is_correct: index === correctIndex,
   }));
 
-  return validateQuestionShape({ type, question_text: questionText, answers }, "This question");
+  return validateQuestionForFormat({ type, question_text: questionText, answers }, format, "This question");
 }
 
 /**
@@ -45,22 +50,22 @@ export async function addQuestion(
   quizId: string,
   input: QuestionInputValues
 ): Promise<QuestionMutationResult> {
-  const validated = buildAndValidateQuestion(input);
-  if (!validated.success) {
-    return { success: false, error: validated.error };
-  }
-
   const supabase = await createClient();
 
   const { sub, error: authError } = await requireSession(supabase);
   if (!sub) return { success: false, error: authError! };
 
-  const { quiz, error: quizError } = await loadOwnedDraftQuiz<OwnedDraftQuizStatus>(
+  const { quiz, error: quizError } = await loadOwnedDraftQuiz<OwnedDraftQuizWithFormat>(
     supabase,
     quizId,
-    "id, status"
+    "id, status, format"
   );
   if (!quiz) return { success: false, error: quizError! };
+
+  const validated = buildAndValidateQuestion(input, quiz.format);
+  if (!validated.success) {
+    return { success: false, error: validated.error };
+  }
 
   const { error } = await supabase.rpc("add_quiz_question", {
     p_quiz_id: quizId,
@@ -88,26 +93,26 @@ export async function updateQuestion(
   questionId: string,
   input: QuestionInputValues
 ): Promise<QuestionMutationResult> {
-  const validated = buildAndValidateQuestion(input);
-  if (!validated.success) {
-    return { success: false, error: validated.error };
-  }
-
   const supabase = await createClient();
 
   const { sub, error: authError } = await requireSession(supabase);
   if (!sub) return { success: false, error: authError! };
 
-  // quizId is only used for this friendly, fast-fail draft check — the
-  // `update_quiz_question` RPC re-derives the question's real quiz and
+  // quizId is only used for this friendly, fast-fail draft/format check —
+  // the `update_quiz_question` RPC re-derives the question's real quiz and
   // re-checks ownership/draft status itself, which is the actual security
   // boundary regardless of what quizId the client sent.
-  const { quiz, error: quizError } = await loadOwnedDraftQuiz<OwnedDraftQuizStatus>(
+  const { quiz, error: quizError } = await loadOwnedDraftQuiz<OwnedDraftQuizWithFormat>(
     supabase,
     quizId,
-    "id, status"
+    "id, status, format"
   );
   if (!quiz) return { success: false, error: quizError! };
+
+  const validated = buildAndValidateQuestion(input, quiz.format);
+  if (!validated.success) {
+    return { success: false, error: validated.error };
+  }
 
   const { error } = await supabase.rpc("update_quiz_question", {
     p_question_id: questionId,
@@ -220,6 +225,18 @@ export async function setQuestionReviewStatus(
 
   if (error) {
     console.error("Failed to update review status:", error.message);
+    // A leftover True/False question from before the quiz's format was
+    // switched to Vocabulary Quiz trips `validate_question_format_trigger`
+    // (supabase/migrations/20260903120000_add_quiz_format_difficulty.sql)
+    // on this otherwise-unrelated column update — surface that specific,
+    // actionable reason rather than the generic fallback.
+    if (error.message.includes("Vocabulary Quiz questions must be Multiple Choice")) {
+      return {
+        success: false,
+        error:
+          "Can't approve — this question is True/False, but Vocabulary Quiz questions must be Multiple Choice. Edit or delete it first.",
+      };
+    }
     return { success: false, error: "Failed to update the review status. Please try again." };
   }
 
@@ -252,10 +269,10 @@ async function approveQuestionIds(
   const { sub, error: authError } = await requireSession(supabase);
   if (!sub) return { success: false, error: authError! };
 
-  const { quiz, error: quizError } = await loadOwnedDraftQuiz<OwnedDraftQuizStatus>(
+  const { quiz, error: quizError } = await loadOwnedDraftQuiz<OwnedDraftQuizWithFormat>(
     supabase,
     quizId,
-    "id, status"
+    "id, status, format"
   );
   if (!quiz) return { success: false, error: quizError! };
 
@@ -282,7 +299,7 @@ async function approveQuestionIds(
       question_text: question.question_text,
       answers: question.answers.map((a) => ({ text: a.answer_text, is_correct: a.is_correct })),
     };
-    const result = validateQuestionShape(shape, `"${question.question_text}"`);
+    const result = validateQuestionForFormat(shape, quiz.format, `"${question.question_text}"`);
     if (!result.success) {
       return { success: false, error: `Can't approve ${result.error}` };
     }

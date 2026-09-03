@@ -12,6 +12,8 @@ function parseQuizForm(formData: FormData) {
   return quizFormSchema.safeParse({
     title: formData.get("title"),
     description: formData.get("description"),
+    format: formData.get("format"),
+    difficulty: formData.get("difficulty"),
     multipleChoiceCount: formData.get("multipleChoiceCount"),
     trueFalseCount: formData.get("trueFalseCount"),
     durationMinutes: formData.get("durationMinutes"),
@@ -30,6 +32,12 @@ function friendlyDbError(message: string): string {
   console.error("Quiz save failed:", message);
   if (message.includes("quizzes_question_counts_match")) {
     return "Total questions must equal Multiple Choice + True/False.";
+  }
+  if (message.includes("quizzes_vocabulary_no_true_false")) {
+    return "Vocabulary Quiz doesn't support True/False questions.";
+  }
+  if (message.includes("quizzes_format_difficulty_valid")) {
+    return "This difficulty isn't available for the selected quiz format.";
   }
   if (message.includes("quizzes_teacher_id_fkey")) {
     // A JWT can still pass local verification (getClaims()) for a few
@@ -64,8 +72,16 @@ export async function createQuiz(
     return { error: "Your session has expired. Please sign in again." };
   }
 
-  const { title, description, multipleChoiceCount, trueFalseCount, durationMinutes, deadline } =
-    parsed.data;
+  const {
+    title,
+    description,
+    format,
+    difficulty,
+    multipleChoiceCount,
+    trueFalseCount,
+    durationMinutes,
+    deadline,
+  } = parsed.data;
 
   const { data: quiz, error } = await supabase
     .from("quizzes")
@@ -73,6 +89,8 @@ export async function createQuiz(
       teacher_id: authData.claims.sub,
       title,
       description: description ?? null,
+      format,
+      difficulty,
       multiple_choice_count: multipleChoiceCount,
       true_false_count: trueFalseCount,
       total_questions: multipleChoiceCount + trueFalseCount,
@@ -123,8 +141,16 @@ export async function updateQuiz(
     return { error: "Only draft quizzes can be edited." };
   }
 
-  const { title, description, multipleChoiceCount, trueFalseCount, durationMinutes, deadline } =
-    parsed.data;
+  const {
+    title,
+    description,
+    format,
+    difficulty,
+    multipleChoiceCount,
+    trueFalseCount,
+    durationMinutes,
+    deadline,
+  } = parsed.data;
 
   // `.eq("status", "draft")` turns the check-above/act-here pair into a
   // compare-and-swap: without it, a quiz published (e.g. from another tab)
@@ -135,6 +161,8 @@ export async function updateQuiz(
     .update({
       title,
       description: description ?? null,
+      format,
+      difficulty,
       multiple_choice_count: multipleChoiceCount,
       true_false_count: trueFalseCount,
       total_questions: multipleChoiceCount + trueFalseCount,

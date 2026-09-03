@@ -7,9 +7,23 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { cn } from "@/lib/utils";
 import type { QuizFormState } from "@/lib/quizzes/actions";
+import {
+  ALLOWED_DIFFICULTIES,
+  QUIZ_FORMATS,
+  QUIZ_FORMAT_LABEL,
+  isDifficultyAllowed,
+  type QuizDifficulty,
+  type QuizFormat,
+} from "@/lib/quizzes/format";
 
 const initialState: QuizFormState = { error: null };
+
+const FORMAT_DESCRIPTION: Record<QuizFormat, string> = {
+  comprehension: "Multiple Choice + True/False, testing understanding of the PDF's content.",
+  vocabulary: "Multiple Choice only, testing vocabulary drawn from the PDF.",
+};
 
 /** `2026-09-01T14:30:00+00:00` → `2026-09-01T14:30` for a datetime-local input. */
 function toDatetimeLocalValue(iso: string | null | undefined): string {
@@ -34,6 +48,8 @@ export function QuizForm({
   defaultValues?: {
     title?: string;
     description?: string | null;
+    format?: QuizFormat;
+    difficulty?: QuizDifficulty;
     multipleChoiceCount?: number;
     trueFalseCount?: number;
     durationMinutes?: number | null;
@@ -41,9 +57,22 @@ export function QuizForm({
   };
 }) {
   const [state, formAction, isPending] = useActionState(action, initialState);
+  const [format, setFormat] = useState<QuizFormat>(defaultValues?.format ?? "comprehension");
+  const [difficulty, setDifficulty] = useState<QuizDifficulty>(defaultValues?.difficulty ?? "B1");
   const [mcCount, setMcCount] = useState(defaultValues?.multipleChoiceCount ?? 0);
   const [tfCount, setTfCount] = useState(defaultValues?.trueFalseCount ?? 0);
-  const total = mcCount + tfCount;
+  const isVocabulary = format === "vocabulary";
+  const total = mcCount + (isVocabulary ? 0 : tfCount);
+
+  function handleFormatChange(nextFormat: QuizFormat) {
+    setFormat(nextFormat);
+    if (!isDifficultyAllowed(nextFormat, difficulty)) {
+      setDifficulty(ALLOWED_DIFFICULTIES[nextFormat][0]);
+    }
+    if (nextFormat === "vocabulary") {
+      setTfCount(0);
+    }
+  }
 
   return (
     <form action={formAction} className="flex flex-col gap-6" noValidate>
@@ -71,7 +100,56 @@ export function QuizForm({
         />
       </div>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+      <div className="flex flex-col gap-1.5">
+        <Label>Quiz format</Label>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {QUIZ_FORMATS.map((value) => (
+            <button
+              key={value}
+              type="button"
+              aria-pressed={format === value}
+              onClick={() => handleFormatChange(value)}
+              className={cn(
+                "flex flex-col items-start gap-1 rounded-lg border px-4 py-3 text-left transition-colors",
+                format === value
+                  ? "border-accent bg-accent/10"
+                  : "border-border bg-background hover:bg-muted"
+              )}
+            >
+              <span className="text-sm font-medium text-foreground">
+                {QUIZ_FORMAT_LABEL[value]}
+              </span>
+              <span className="text-xs text-muted-foreground">{FORMAT_DESCRIPTION[value]}</span>
+            </button>
+          ))}
+        </div>
+        <input type="hidden" name="format" value={format} />
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <Label>Difficulty (CEFR)</Label>
+        <div className="flex flex-wrap gap-2">
+          {ALLOWED_DIFFICULTIES[format].map((level) => (
+            <button
+              key={level}
+              type="button"
+              aria-pressed={difficulty === level}
+              onClick={() => setDifficulty(level)}
+              className={cn(
+                "rounded-lg border px-4 py-1.5 text-sm font-medium transition-colors",
+                difficulty === level
+                  ? "border-accent bg-accent/10 text-accent"
+                  : "border-border bg-background text-muted-foreground hover:bg-muted"
+              )}
+            >
+              {level}
+            </button>
+          ))}
+        </div>
+        <input type="hidden" name="difficulty" value={difficulty} />
+      </div>
+
+      <div className={cn("grid grid-cols-1 gap-4", !isVocabulary && "sm:grid-cols-2")}>
         <div className="flex flex-col gap-1.5">
           <Label htmlFor="multipleChoiceCount">Multiple Choice questions</Label>
           <Input
@@ -84,18 +162,22 @@ export function QuizForm({
             onChange={(e) => setMcCount(Math.max(0, Number(e.target.value) || 0))}
           />
         </div>
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="trueFalseCount">True/False questions</Label>
-          <Input
-            id="trueFalseCount"
-            name="trueFalseCount"
-            type="number"
-            min={0}
-            inputMode="numeric"
-            value={tfCount}
-            onChange={(e) => setTfCount(Math.max(0, Number(e.target.value) || 0))}
-          />
-        </div>
+        {isVocabulary ? (
+          <input type="hidden" name="trueFalseCount" value={0} />
+        ) : (
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="trueFalseCount">True/False questions</Label>
+            <Input
+              id="trueFalseCount"
+              name="trueFalseCount"
+              type="number"
+              min={0}
+              inputMode="numeric"
+              value={tfCount}
+              onChange={(e) => setTfCount(Math.max(0, Number(e.target.value) || 0))}
+            />
+          </div>
+        )}
       </div>
 
       <div className="flex items-center justify-between rounded-lg bg-muted px-4 py-3">

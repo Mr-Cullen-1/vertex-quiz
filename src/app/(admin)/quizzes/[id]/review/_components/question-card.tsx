@@ -26,6 +26,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { deleteQuestion, setQuestionReviewStatus } from "@/lib/quizzes/question-actions";
+import type { QuizFormat } from "@/lib/quizzes/format";
 import { QuestionEditorDialog } from "./question-editor-dialog";
 import type { QuestionWithAnswers } from "./question-list";
 
@@ -38,6 +39,7 @@ const OPTION_LABELS = ["A", "B", "C", "D"];
 
 export function QuestionCard({
   quizId,
+  quizFormat,
   question,
   position,
   isFirst,
@@ -49,6 +51,7 @@ export function QuestionCard({
   onMoveDown,
 }: {
   quizId: string;
+  quizFormat: QuizFormat;
   question: QuestionWithAnswers;
   position: number;
   isFirst: boolean;
@@ -154,6 +157,7 @@ export function QuestionCard({
         <div className="flex shrink-0 items-center gap-1.5">
           <QuestionEditorDialog
             quizId={quizId}
+            quizFormat={quizFormat}
             title="Edit question"
             description="Editing marks this question pending again — it'll need re-approval."
             submitLabel="Save changes"

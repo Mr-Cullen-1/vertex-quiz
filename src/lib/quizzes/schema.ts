@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { QUIZ_DIFFICULTIES, QUIZ_FORMATS, isDifficultyAllowed } from "./format.ts";
 
 const TITLE_MAX_LENGTH = 200;
 const DESCRIPTION_MAX_LENGTH = 2000;
@@ -45,6 +46,8 @@ export const quizFormSchema = z
         .max(DESCRIPTION_MAX_LENGTH, `Description must be ${DESCRIPTION_MAX_LENGTH} characters or fewer`)
         .optional()
     ),
+    format: z.enum(QUIZ_FORMATS, { error: "Select a quiz format" }),
+    difficulty: z.enum(QUIZ_DIFFICULTIES, { error: "Select a difficulty level" }),
     multipleChoiceCount: z.coerce
       .number({ error: "Enter a number" })
       .int("Must be a whole number")
@@ -55,6 +58,14 @@ export const quizFormSchema = z
       .min(0, "Must be 0 or more"),
     durationMinutes: optionalDurationMinutes,
     deadline: optionalDeadline,
+  })
+  .refine((data) => isDifficultyAllowed(data.format, data.difficulty), {
+    message: "This difficulty isn't available for the selected quiz format.",
+    path: ["difficulty"],
+  })
+  .refine((data) => data.format !== "vocabulary" || data.trueFalseCount === 0, {
+    message: "Vocabulary Quiz doesn't support True/False questions.",
+    path: ["trueFalseCount"],
   })
   .refine(
     (data) => data.multipleChoiceCount + data.trueFalseCount >= 1,

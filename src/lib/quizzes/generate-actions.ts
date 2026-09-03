@@ -13,6 +13,7 @@ import { geminiExtractionSchema, geminiResponseJsonSchema } from "@/lib/gemini/s
 import { buildExtractionPrompt } from "@/lib/gemini/prompt";
 import { validateExtraction } from "@/lib/gemini/validate";
 import { loadOwnedDraftQuiz, requireSession } from "./ownership";
+import type { QuizDifficulty, QuizFormat } from "./format";
 import {
   QUIZ_PDF_BUCKET,
   quizPdfStoragePath,
@@ -28,13 +29,15 @@ export type ClearQuestionsResult = { success: true } | { success: false; error: 
 type OwnedDraftQuiz = {
   id: string;
   status: string;
+  format: QuizFormat;
+  difficulty: QuizDifficulty;
   multiple_choice_count: number;
   true_false_count: number;
   source_pdf_path: string | null;
 };
 
 const OWNED_DRAFT_QUIZ_SELECT =
-  "id, status, multiple_choice_count, true_false_count, source_pdf_path";
+  "id, status, format, difficulty, multiple_choice_count, true_false_count, source_pdf_path";
 
 /**
  * Uploads a PDF for a draft quiz to private Storage
@@ -156,6 +159,8 @@ export async function generateQuestions(quizId: string): Promise<GenerateQuestio
       contents: [
         createPartFromBase64(pdfBase64, "application/pdf"),
         buildExtractionPrompt({
+          format: quiz.format,
+          difficulty: quiz.difficulty,
           multipleChoiceCount: quiz.multiple_choice_count,
           trueFalseCount: quiz.true_false_count,
         }),
@@ -202,6 +207,7 @@ export async function generateQuestions(quizId: string): Promise<GenerateQuestio
   const validation = validateExtraction(parsed.data, {
     multipleChoiceCount: quiz.multiple_choice_count,
     trueFalseCount: quiz.true_false_count,
+    format: quiz.format,
   });
   if (!validation.success) {
     return { success: false, error: validation.error };

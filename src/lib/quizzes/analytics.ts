@@ -2,6 +2,7 @@ import "server-only";
 import type { SupabaseServerClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { finalizeSession } from "@/lib/student/scoring";
+import { computeSessionOverview } from "./session-overview";
 
 const SCORE_BUCKETS = [
   { label: "90–100%", min: 90, max: 100 },
@@ -244,10 +245,8 @@ async function finalizeStaleSessions(sessions: SessionRow[]): Promise<void> {
 }
 
 function buildOverview(sessions: SessionRow[]): QuizAnalyticsOverview {
-  const participants = sessions.length;
-  const completed = sessions.filter((s) => s.status === "completed").length;
-  const expired = sessions.filter((s) => s.status === "expired").length;
-  const inProgress = participants - completed - expired;
+  const shared = computeSessionOverview(sessions);
+  const inProgress = shared.sessions - shared.completed - shared.expired;
 
   const scored = sessions.filter((s) => s.score != null);
   const scores = scored.map((s) => s.score as number);
@@ -258,13 +257,13 @@ function buildOverview(sessions: SessionRow[]): QuizAnalyticsOverview {
   );
 
   return {
-    participants,
-    completed,
-    expired,
+    participants: shared.sessions,
+    completed: shared.completed,
+    expired: shared.expired,
     inProgress,
-    completionRate: participants > 0 ? Math.round((completed / participants) * 100) : null,
+    completionRate: shared.completionRate,
     scoredSessionCount: scored.length,
-    averageScore: average(scores),
+    averageScore: shared.averageScore,
     highestScore: scores.length > 0 ? Math.max(...scores) : null,
     lowestScore: scores.length > 0 ? Math.min(...scores) : null,
     averageCompletionSeconds: average(durationsSeconds),

@@ -1,4 +1,6 @@
-export type QuestionTypeValue = "multiple_choice" | "true_false";
+import { isQuestionTypeAllowed, type QuestionTypeValue, type QuizFormat } from "./format.ts";
+
+export type { QuestionTypeValue };
 
 export type QuestionAnswerInput = {
   text: string;
@@ -92,4 +94,27 @@ export function validateQuestionShape(
     success: true,
     question: { type: question.type, question_text: questionText, answers },
   };
+}
+
+/**
+ * Same authority as `validateQuestionShape`, plus the one rule that
+ * depends on the quiz's format rather than the question alone: a
+ * Vocabulary Quiz question must be Multiple Choice — True/False is a
+ * Comprehension-only question type. Called everywhere a question (AI
+ * -generated or teacher-authored) is about to be validated against a quiz
+ * whose format is known: `src/lib/gemini/validate.ts`,
+ * `src/lib/quizzes/question-actions.ts`, and `src/lib/quizzes/publish-actions.ts`.
+ */
+export function validateQuestionForFormat(
+  question: QuestionShapeInput,
+  format: QuizFormat,
+  label: string
+): QuestionShapeResult {
+  if (!isQuestionTypeAllowed(format, question.type)) {
+    return {
+      success: false,
+      error: `${label} is True/False, but Vocabulary Quiz questions must be Multiple Choice.`,
+    };
+  }
+  return validateQuestionShape(question, label);
 }

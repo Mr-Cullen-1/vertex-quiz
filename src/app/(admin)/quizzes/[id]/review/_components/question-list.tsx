@@ -22,6 +22,7 @@ import {
   approveSelectedQuestions,
   reorderQuestions,
 } from "@/lib/quizzes/question-actions";
+import type { QuizFormat } from "@/lib/quizzes/format";
 import { QuestionCard } from "./question-card";
 
 export type QuestionWithAnswers = {
@@ -40,9 +41,11 @@ export type QuestionWithAnswers = {
 
 export function QuestionList({
   quizId,
+  quizFormat,
   questions,
 }: {
   quizId: string;
+  quizFormat: QuizFormat;
   questions: QuestionWithAnswers[];
 }) {
   const router = useRouter();
@@ -219,6 +222,7 @@ export function QuestionList({
         <QuestionCard
           key={question.id}
           quizId={quizId}
+          quizFormat={quizFormat}
           question={question}
           position={index + 1}
           isFirst={index === 0}
